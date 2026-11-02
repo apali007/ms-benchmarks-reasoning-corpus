@@ -392,21 +392,29 @@ def parse_parquet(parquet_path, num_examples=100):
 
 def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance):
     b_ions, y_ions = theoretical_ions(peptide, aa_masses)
+    theoretical = {**b_ions, **y_ions}
+    peaks = list(zip(mz_list, intensity_list))
 
-    matched_b, matched_y, noise = {}, {}, []
-    
-    for mz, intensity in zip(mz_list, intensity_list):
-        hit = False
-        for name, tmz in b_ions.items():
-            if abs(mz - tmz) <= fragment_tolerance:
-                matched_b[name] = (mz, intensity); hit = True; break
-        if hit:
+    # All (ion, peak) pairs within tolerance
+    candidates = []
+    for name, tmz in theoretical.items():
+        for peak_idx, (mz, intensity) in enumerate(peaks):
+            error = abs(mz-tmz)
+            if error <= fragment_tolerance:
+                candidates.append((error, -intensity, name, peak_idx))
+
+    # Assign the closest pairs first; each ion and each peak used at most once
+    candidates.sort()
+    assigned_ions, assigned_peaks = {}, set()
+    for error, _, name, peak_idx in candidates:
+        if name in assigned_ions or peak_idx in assigned_peaks:
             continue
-        for name, tmz in y_ions.items():
-            if abs(mz - tmz) <= fragment_tolerance:
-                matched_y[name] = (mz, intensity); hit = True; break
-        if not hit:
-            noise.append((mz, intensity))
+        assigned_ions[name] = peaks[peak_idx]
+        assigned_peaks.add(peak_idx)
+
+    matched_b = {name: peak for name, peak in assigned_ions.items() if name.startswith('b')}
+    matched_y = {name: peak for name, peak in assigned_ions.items() if name.startswith('y')}
+    noise = [peak for idx, peak in enumerate(peaks) if idx not in assigned_peaks]
 
     return matched_y, matched_b, noise
 
