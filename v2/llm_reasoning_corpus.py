@@ -139,15 +139,22 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_neutral_mass, 
             prev_mz = None
             continue
 
-        (mz, intensity) = peak_information
+        (mz, intensity, charge) = peak_information
+        ion_mass = mz * charge - (charge - 1) * MASS_PROTON
+        if charge > 1:
+            traces.append(
+                f"{ion_type}{i} is observed as a {charge}+ ion at m/z {mz:.5f}; its singly charged mass is "
+                f"{mz:.5f} x {charge} - {charge-1} x {MASS_PROTON:.5F} = {ion_mass:.5f} Da."
+            )
+
         if i == 1: 
-            traces.append(handle_first_position(mz, ion_type, ladder_residues))
+            traces.append(handle_first_position(ion_mass, ion_type, ladder_residues))
             derived_aa_pos[i-1] = ladder_residues[i-1]
         else:
             if prev_mz is not None:
-                predicted_aa_mass = mz-prev_mz
+                predicted_aa_mass = ion_mass-prev_mz
                 traces.append(
-                        f"The difference between {ion_type}{i} and {ion_type}{i-1} ({mz:.5f} - {prev_mz:.5f} = {predicted_aa_mass:.5f} Da) identifies the {ordinal(i)} residue from the {terminal}-terminus as {ladder_residues[i-1]}. "
+                        f"The difference between {ion_type}{i} and {ion_type}{i-1} ({ion_mass:.5f} - {prev_mz:.5f} = {predicted_aa_mass:.5f} Da) identifies the {ordinal(i)} residue from the {terminal}-terminus as {ladder_residues[i-1]}. "
                     )
                 derived_aa_pos[i-1] = ladder_residues[i-1]
             # else:
@@ -158,7 +165,7 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_neutral_mass, 
             #     derived_aa_pos[i-1] = ladder_residues[i-1]
 
 
-        prev_mz = mz
+        prev_mz = ion_mass
 
     if VERBOSE:
         detected_positions = [f"{ion_type}{i+1}" for i, aa in enumerate(derived_aa_pos) if aa is not None]
@@ -390,33 +397,42 @@ def parse_parquet(parquet_path, num_examples=100):
     print(f"Selected {n_selected}, skipped {n_modified} modified peptides")
     return spectra
 
-def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance):
-    b_ions, y_ions = theoretical_ions(peptide, aa_masses)
-    theoretical = {**b_ions, **y_ions}
+def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance, max_fragment_charge):
+    theoretical = []
     peaks = list(zip(mz_list, intensity_list))
 
-    # All (ion, peak) pairs within tolerance
+    for charge in range(1, max_fragment_charge + 1):
+        b_ions, y_ions = theoretical_ions(peptide, aa_masses, charge)
+        for name, tmz in {**b_ions, **y_ions}.items():
+            theoretical.append((name, charge, tmz))
+
+    # All (ion, charge, peak) pairs within tolerance
     candidates = []
-    for name, tmz in theoretical.items():
+    for name, charge, tmz in theoretical:
         for peak_idx, (mz, intensity) in enumerate(peaks):
             error = abs(mz-tmz)
             if error <= fragment_tolerance:
-                candidates.append((error, -intensity, name, peak_idx))
+                candidates.append((charge, error, -intensity, name, peak_idx))
 
-    # Assign the closest pairs first; each ion and each peak used at most once
+    # Lower charge first, then closest, then most intense; each ion and each peak used at most once
     candidates.sort()
-    assigned_ions, assigned_peaks = {}, set()
-    for error, _, name, peak_idx in candidates:
-        if name in assigned_ions or peak_idx in assigned_peaks:
+    assigned, assigned_peaks = {}, set()
+    for charge, error, _, name, peak_idx in candidates:
+        if (name, charge) in assigned or peak_idx in assigned_peaks:
             continue
-        assigned_ions[name] = peaks[peak_idx]
+        assigned[(name, charge)] = peaks[peak_idx]
         assigned_peaks.add(peak_idx)
 
-    matched_b = {name: peak for name, peak in assigned_ions.items() if name.startswith('b')}
-    matched_y = {name: peak for name, peak in assigned_ions.items() if name.startswith('y')}
+    # One peak per ladder position: keep the lowest charge observed
+    matched_b, matched_y = {}, {}
+    for (name, charge), (mz, intensity) in sorted(assigned.items(), key=lambda kv: kv[0][1]):
+        target = matched_b if name.startswith('b') else matched_y
+        if name not in target:
+            target[name] = (mz, intensity, charge)
+
     noise = [peak for idx, peak in enumerate(peaks) if idx not in assigned_peaks]
 
-    return matched_y, matched_b, noise
+    return matched_y, matched_b, assigned, noise
 
 def normalize(s):
     return s.replace('I', 'L')
@@ -447,7 +463,7 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
             print(f"label Peptide: {peptide}")
             print(f"PSM id: {spec['psmid']}")
     
-        matched_y, matched_b, noise = match_ions(peptide, mz_list, intensity_list, params['aa_masses'], params['fragment_tolerance'])
+        matched_y, matched_b, annotations, noise = match_ions(peptide, mz_list, intensity_list, params['aa_masses'], params['fragment_tolerance'], spec['precursor_charge'])
         
         is_label_match, is_precursor_match, predicted_sequence, reasoning_trace, case_label = derive_peptide(
             matched_y,
