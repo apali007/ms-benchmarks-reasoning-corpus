@@ -139,13 +139,21 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_neutral_mass, 
             prev_mz = None
             continue
 
-        (mz, intensity, charge) = peak_information
+        (mz, intensity, charge, loss) = peak_information
         ion_mass = mz * charge - (charge - 1) * MASS_PROTON
         if charge > 1:
             traces.append(
                 f"{ion_type}{i} is observed as a {charge}+ ion at m/z {mz:.5f}; its singly charged mass is "
                 f"{mz:.5f} x {charge} - {charge-1} x {MASS_PROTON:.5F} = {ion_mass:.5f} Da."
             )
+        if loss is not None:
+            loss_mass = NEUTRAL_LOSS_MASSES[loss]
+            traces.append(
+                f"The {ion_type}{i} ion is observed after a neutral loss of {loss} ({ion_mass:.5f} Da); "
+                f"adding back {loss_mass:.5f} Da gives {ion_mass + loss_mass:.5f} Da. "
+            )
+
+            ion_mass += loss_mass
 
         if i == 1: 
             traces.append(handle_first_position(ion_mass, ion_type, ladder_residues))
@@ -398,37 +406,41 @@ def parse_parquet(parquet_path, num_examples=100):
     return spectra
 
 def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance, max_fragment_charge):
+    # Each theoretical ion: (loss_rank, name, charge, loss, m/z). Intact ions have loss_rank 0, neutral losses 1.
     theoretical = []
     peaks = list(zip(mz_list, intensity_list))
 
     for charge in range(1, max_fragment_charge + 1):
         b_ions, y_ions = theoretical_ions(peptide, aa_masses, charge)
         for name, tmz in {**b_ions, **y_ions}.items():
-            theoretical.append((name, charge, tmz))
+            theoretical.append((0, name, charge, None, tmz))
+            for loss, loss_mass in NEUTRAL_LOSS_MASSES.items():
+                theoretical.append((1, name, charge, loss, tmz - loss_mass / charge))
 
     # All (ion, charge, peak) pairs within tolerance
     candidates = []
-    for name, charge, tmz in theoretical:
+    for loss_rank, name, charge, loss, tmz in theoretical:
         for peak_idx, (mz, intensity) in enumerate(peaks):
             error = abs(mz-tmz)
             if error <= fragment_tolerance:
-                candidates.append((charge, error, -intensity, name, peak_idx))
+                candidates.append((loss_rank, charge, error, -intensity, name, loss, peak_idx))
 
-    # Lower charge first, then closest, then most intense; each ion and each peak used at most once
+    # Intact before neutral loss, lower charge first, then closest, then most intense; 
+    # each ion and each peak used at most once
     candidates.sort()
     assigned, assigned_peaks = {}, set()
-    for charge, error, _, name, peak_idx in candidates:
-        if (name, charge) in assigned or peak_idx in assigned_peaks:
+    for loss_rank, charge, error, _, name, loss, peak_idx in candidates:
+        if (name, charge, loss) in assigned or peak_idx in assigned_peaks:
             continue
-        assigned[(name, charge)] = peaks[peak_idx]
+        assigned[(name, charge, loss)] = peaks[peak_idx]
         assigned_peaks.add(peak_idx)
 
-    # One peak per ladder position: keep the lowest charge observed
+    # One peak per ladder position: prefer intact over neutral loss, then the lowest charge
     matched_b, matched_y = {}, {}
-    for (name, charge), (mz, intensity) in sorted(assigned.items(), key=lambda kv: kv[0][1]):
+    for (name, charge, loss), (mz, intensity) in sorted(assigned.items(), key=lambda kv: (kv[0][2] is not None, kv[0][1])):
         target = matched_b if name.startswith('b') else matched_y
         if name not in target:
-            target[name] = (mz, intensity, charge)
+            target[name] = (mz, intensity, charge, loss)
 
     noise = [peak for idx, peak in enumerate(peaks) if idx not in assigned_peaks]
 
