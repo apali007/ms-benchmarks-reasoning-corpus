@@ -12,4 +12,4 @@ print(pf.schema_arrow)
 print(pf.metadata.num_rows)
 
 df = pf.read_row_group(0).to_pandas()
-print(df.head(1).T)
+print(df.head(10).T)

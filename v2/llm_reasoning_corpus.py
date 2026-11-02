@@ -1,3 +1,4 @@
+import os
 import json
 import re
 import numpy as np
@@ -7,12 +8,13 @@ import argparse
 
 from constants import (
     AA_MASSES, NEUTRAL_LOSS_MASSES, MASS_PROTON,
-    PRECURSOR_TOLERANCE, DEFAULT_PEAK_TOLERANCE,
+    DATASET_METADATA_ROOT,
     CASE_CLEAN_B_ION_LADDER, CASE_CLEAN_Y_ION_LADDER,
     CASE_COMPLEMENTARY_GAPS, CASE_UNRESOLVABLE_MULTI_GAP,
     CASE_SINGLE_GAP_RESOLVED, CASE_UNRESOLVABLE_SINGLE_GAP_MASS_MISMATCH,
     CASES
 )
+
 
 def ordinal(n):
     #Convert an integer to its ordinal string: 1 -> '1st', 2 -> '2nd', 11 -> '11th', etc.
@@ -41,23 +43,23 @@ def handle_terminal_ion(ion_type, n, prev_mz, precursor_neutral_mass, predicted_
     
     return terminal_ion_trace
 
-def validate_precursor(final_sequence, precursor_neutral_mass):
+def validate_precursor(final_sequence, precursor_neutral_mass, aa_masses, precursor_tol_da):
 
-    theoretical_mass_with_water = sum(AA_MASSES[r] for r in final_sequence) +  NEUTRAL_LOSS_MASSES['H2O']
+    theoretical_mass_with_water = sum(aa_masses[r] for r in final_sequence) +  NEUTRAL_LOSS_MASSES['H2O']
     diff = abs(precursor_neutral_mass - theoretical_mass_with_water)
-    is_valid = diff <= PRECURSOR_TOLERANCE
+    is_valid = diff <= precursor_tol_da
 
     return is_valid, diff, theoretical_mass_with_water
 
-def final_precursor_check(final_sequence, precursor_neutral_mass):
+def final_precursor_check(final_sequence, precursor_neutral_mass, aa_masses, precursor_tol_da):
 
-    is_precursor_valid, diff, theoretical_mass_with_water = validate_precursor(final_sequence, precursor_neutral_mass)
+    is_precursor_valid, diff, theoretical_mass_with_water = validate_precursor(final_sequence, precursor_neutral_mass, aa_masses, precursor_tol_da)
 
     if not is_precursor_valid:
         return "", False
     else:
         trace = (f"Validating against the precursor mass: Theoretical mass of {final_sequence} (sum of residue masses plus one water molecule): {theoretical_mass_with_water:.5f} Da. "
-        f"Precursor-derived neutral mass: {precursor_neutral_mass:.5f} Da. Difference: {diff:.5f} Da is within the {PRECURSOR_TOLERANCE:.5f} Da tolerance, confirming the derived sequence is consistent with the measured precursor mass. ")
+        f"Precursor-derived neutral mass: {precursor_neutral_mass:.5f} Da. Difference: {diff:.5f} Da is within the {precursor_tol_da:.5f} Da tolerance, confirming the derived sequence is consistent with the measured precursor mass. ")
 
         return trace, True
     
@@ -97,7 +99,7 @@ def handle_first_position(mz, ion_type, ladder_residues):
     
     return trace
 
-def extend_ladder(ion_type, matched_ion, label_peptide, precursor_neutral_mass, precursor_charge):
+def extend_ladder(ion_type, matched_ion, label_peptide, precursor_neutral_mass, precursor_charge, aa_masses, precursor_tol_da):
     residues = list(label_peptide)
     n = len(residues)
     if ion_type == 'y':
@@ -125,7 +127,7 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_neutral_mass, 
                     predicted_aa_mass = precursor_neutral_mass - prev_mz + MASS_PROTON
                 else:
                     predicted_aa_mass = precursor_neutral_mass - NEUTRAL_LOSS_MASSES['H2O'] - prev_mz + MASS_PROTON
-                is_precursor_validated, _ , _ = validate_precursor(label_peptide, precursor_neutral_mass)
+                is_precursor_validated, _ , _ = validate_precursor(label_peptide, precursor_neutral_mass, aa_masses, precursor_tol_da)                
                 if is_precursor_validated:
                     traces.append(handle_terminal_ion(ion_type, n, prev_mz, precursor_neutral_mass, predicted_aa_mass, ladder_residues[i-1]))
                     derived_aa_pos[i-1] = ladder_residues[i-1] 
@@ -168,26 +170,33 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_neutral_mass, 
         
     return derived_aa_pos, traces
 
-def derive_peptide( matched_y, matched_b, label_peptide, precursor_mz, precursor_charge):
+def derive_peptide(matched_y, matched_b, label_peptide, precursor_mz, precursor_charge, params):
     label_residues = list(label_peptide)
     precursor_neutral_mass = precursor_mz * precursor_charge - precursor_charge * MASS_PROTON
+    aa_masses = params['aa_masses']
+    fragment_tolerance = params['fragment_tolerance']
+    precursor_tol_da =  precursor_tolerance_da(params, precursor_neutral_mass, precursor_charge)
     n = len(label_peptide)
 
     if VERBOSE:
         print(f"Length of the peptide: {n}")
         print(f"precursor_mz: {precursor_mz:.5f}")
-        print(f"precursor_mz: {precursor_charge}")
-        print(f"precursor_tolerance: {PRECURSOR_TOLERANCE}")
+        print(f"precursor_charge: {precursor_charge}")
+        print(f"precursor_tolerance: {precursor_tol_da:.5f} Da")
+        print(f"fragment_tolerance: {fragment_tolerance:.5f} Da")
         
     reasoning_trace = []
 
-    reasoning_trace.append(f"Analyzing spectra for the y-ion and b-ion ladder to predict the peptide sequence, using the given precursor information with mass tolerance of {DEFAULT_PEAK_TOLERANCE:.5f} Da.")
+    tolerance_trace = (f"Analyzing spectra for the y-ion and b-ion ladder to predict the peptide sequence, "
+        f"using a fragment mass tolerance of {fragment_tolerance:.5f} Da and a precursor mass tolerance of "
+        f"{params['precursor_window']:g} {params['precursor_window_type']} ({precursor_tol_da:.5f} Da).")
+    reasoning_trace.append(tolerance_trace)
 
     if VERBOSE:
-        print(f"Analyzing spectra for the y-ion and b-ion ladder to predict the peptide sequence, using the given precursor information with mass tolerance of {DEFAULT_PEAK_TOLERANCE:.5f} Da.")
+        print(tolerance_trace)
 
     reasoning_trace.append("First, trying to derive the sequence using the y-ion ladder (C-terminus to N-terminus): ")
-    y_derived, y_traces = extend_ladder('y', matched_y, label_peptide, precursor_neutral_mass, precursor_charge)
+    y_derived, y_traces = extend_ladder('y', matched_y, label_peptide, precursor_neutral_mass, precursor_charge, aa_masses, precursor_tol_da)
     reasoning_trace.append('\n'.join(y_traces))
 
     y_seq_str = format_ladder_sequence_dash(y_derived)
@@ -197,14 +206,15 @@ def derive_peptide( matched_y, matched_b, label_peptide, precursor_mz, precursor
 
     if not y_has_gap:
         final_sequence = "".join(y_derived)
-        precursor_validation_trace, is_precursor_match = final_precursor_check(final_sequence, precursor_neutral_mass)
+        precursor_validation_trace, is_precursor_match = final_precursor_check(final_sequence, precursor_neutral_mass, aa_masses, precursor_tol_da)
         reasoning_trace.append(precursor_validation_trace)
-        reasoning_trace.append(f"No need to derive a b-ion ladder as the complete sequence is confirmed. Final predicted sequence: {final_sequence}. ")
+        if is_precursor_match:
+            reasoning_trace.append(f"No need to derive a b-ion ladder as the complete sequence is confirmed. Final predicted sequence: {final_sequence}. ")
         is_match = (label_peptide == final_sequence)
         return is_match, is_precursor_match, final_sequence, reasoning_trace, CASE_CLEAN_Y_ION_LADDER
 
     reasoning_trace.append("Next, trying to derive the sequence using the b-ion ladder (N-terminus to C-terminus): ")
-    b_derived, b_traces = extend_ladder('b', matched_b, label_peptide, precursor_neutral_mass, precursor_charge)
+    b_derived, b_traces = extend_ladder('b', matched_b, label_peptide, precursor_neutral_mass, precursor_charge, aa_masses, precursor_tol_da)
     reasoning_trace.append('\n'.join(b_traces))
 
     b_seq_str = format_ladder_sequence_dash(b_derived)
@@ -214,9 +224,10 @@ def derive_peptide( matched_y, matched_b, label_peptide, precursor_mz, precursor
     
     if not b_has_gap:
         final_sequence = "".join(b_derived)
-        precursor_validation_trace, is_precursor_match = final_precursor_check(final_sequence, precursor_neutral_mass)
+        precursor_validation_trace, is_precursor_match = final_precursor_check(final_sequence, precursor_neutral_mass, aa_masses, precursor_tol_da)
         reasoning_trace.append(precursor_validation_trace)
-        reasoning_trace.append(f"Final predicted sequence: {final_sequence}. ")
+        if is_precursor_match:
+            reasoning_trace.append(f"Final predicted sequence: {final_sequence}. ")
         is_match = (label_peptide == final_sequence)
         return is_match, is_precursor_match, final_sequence, reasoning_trace, CASE_CLEAN_B_ION_LADDER
 
@@ -230,19 +241,20 @@ def derive_peptide( matched_y, matched_b, label_peptide, precursor_mz, precursor
     if gap_count == 0:
         final_sequence_after_handle = "".join(b_derived_after_handle)
         reasoning_trace.append(f"Combining both ladders gives the full predicted sequence: {final_sequence_after_handle}. ")
-        precursor_validation_trace, is_precursor_match = final_precursor_check(final_sequence_after_handle, precursor_neutral_mass)
+        precursor_validation_trace, is_precursor_match = final_precursor_check(final_sequence_after_handle, precursor_neutral_mass, aa_masses, precursor_tol_da)
         reasoning_trace.append(precursor_validation_trace)
-        reasoning_trace.append(f"Final predicted sequence: {final_sequence_after_handle}. ")
+        if is_precursor_match:
+            reasoning_trace.append(f"Final predicted sequence: {final_sequence_after_handle}. ")
         is_match = (label_peptide == final_sequence_after_handle)
         return is_match, is_precursor_match, final_sequence_after_handle, reasoning_trace, CASE_COMPLEMENTARY_GAPS
     
     if gap_count == 1:
         gap_pos = gap_indices[0]
         aa_gap = label_residues[gap_pos]
-        sum_identified_residues = sum(AA_MASSES[aa] for aa in b_derived_after_handle if aa is not None)
+        sum_identified_residues = sum(aa_masses[aa] for aa in b_derived_after_handle if aa is not None)
         identified_residues = '+'.join(aa for aa in b_derived_after_handle if aa is not None)
         predicted_aa_mass = precursor_neutral_mass - sum_identified_residues - NEUTRAL_LOSS_MASSES['H2O']
-        is_precursor_validated, _ , _ = validate_precursor(label_peptide, precursor_neutral_mass)
+        is_precursor_validated, _ , _ = validate_precursor(label_peptide, precursor_neutral_mass, aa_masses, precursor_tol_da)
         if is_precursor_validated:
             incomplete_sequence = format_ladder_sequence(b_derived_after_handle) 
             reasoning_trace.append(
@@ -257,9 +269,10 @@ def derive_peptide( matched_y, matched_b, label_peptide, precursor_mz, precursor
 
             reasoning_trace.append(f"Combining all resolved positions gives the complete predicted sequence: {final_sequence_after_handle}. ")
 
-            precursor_validation_trace, is_precursor_match = final_precursor_check(final_sequence_after_handle, precursor_neutral_mass)
+            precursor_validation_trace, is_precursor_match = final_precursor_check(final_sequence_after_handle, precursor_neutral_mass, aa_masses, precursor_tol_da)
             reasoning_trace.append(precursor_validation_trace)
-            reasoning_trace.append(f"Final predicted sequence: {final_sequence_after_handle}. ")
+            if is_precursor_match:
+                reasoning_trace.append(f"Final predicted sequence: {final_sequence_after_handle}. ")
             is_match = (label_peptide == final_sequence_after_handle)
             return is_match, is_precursor_match, final_sequence_after_handle, reasoning_trace, CASE_SINGLE_GAP_RESOLVED
             
@@ -291,55 +304,106 @@ def is_valid_peptide(peptide):
     return bool(peptide) and bool(re.fullmatch(r'[A-Z]+', peptide)) and all(aa in AA_MASSES for aa in peptide)
 
 # Compute theoretical b and y ions for a peptide sequence
-def theoretical_ions(peptide, charge=1):
+def theoretical_ions(peptide, aa_masses, charge=1):
     b_ions, y_ions = {}, {}
     mass = 0.0
     for i in range(len(peptide) - 1):
-        mass += AA_MASSES[peptide[i]]
+        mass += aa_masses[peptide[i]]
         b_ions[f"b{i+1}"] = (mass + charge * MASS_PROTON) / charge
     mass = 0.0
     for i in range(len(peptide) - 1, 0, -1):
-        mass += AA_MASSES[peptide[i]]
+        mass += aa_masses[peptide[i]]
         y_ions[f"y{len(peptide)-i}"] = (mass + NEUTRAL_LOSS_MASSES['H2O'] + charge * MASS_PROTON) / charge
     return b_ions, y_ions
+
+def load_search_params(dataset):
+    metadata_path = os.path.join(DATASET_METADATA_ROOT, f"{dataset}.json")
+    with open(metadata_path) as f:
+        metadata = json.load(f)
+
+    aa_masses = dict(AA_MASSES)
+    for entry in metadata.get('modifications', '').split(','):
+        entry = entry.strip()
+        if not entry:
+            continue
+        m = re.match(r'^([A-Z]+)([+-][\d.]+)$', entry)
+        if m is None:
+            raise ValueError(f"Cannot parse modification '{entry}' in {metadata_path}")
+        residues, delta = m.groups()
+        for aa in residues:
+            aa_masses[aa] += float(delta)
+
+
+    return {
+        'aa_masses': aa_masses,
+        'fragment_tolerance': float(metadata['Fragment_Tolerance']),
+        'precursor_window': float(metadata['Precursor_mz_Tolerance']),
+        'precursor_window_type': metadata['Precursor_mz_Unit'].strip().lower(),
+    }
+
+
+def precursor_tolerance_da(params, precursor_neutral_mass, precursor_charge):
+    window = params['precursor_window']
+    window_type = params['precursor_window_type']
+    if window_type == 'ppm':
+        return window * precursor_neutral_mass / 1e6
+    if window_type == 'da':
+        return window
+    raise ValueError(f"Unknown precursor tolerance unit: {window_type}")
+
 
 
 # Parse PARQUET file and extract spectrum data
 def parse_parquet(parquet_path, num_examples=100):
 
+    columns = ['dataset', 'PSMId', 'peptide', 'modified_peptide', 'precursor_mz', 'charge', 'mz_array', 'intensity_array']
     pf = pq.ParquetFile(parquet_path)
-    batch = next(pf.iter_batches(batch_size = num_examples))
-    df = batch.to_pandas()
+    spectra = []
+    n_selected = 0
+    n_modified = 0
 
-    spectra = [
-        {
-            "psmid": r.PSMId,
-            "peptide": r.peptide,
-            "precursor_mz": r.precursor_mz,
-            "precursor_charge": int(r.charge),
-            "mz": r.mz_array.tolist(),
-            "intensity": r.intensity_array.tolist(),
-        }
+    for batch in pf.iter_batches(batch_size=10000, columns=columns):
 
-        for r in df.itertuples()
-    ]
+        df = batch.to_pandas()
 
+        for r in df.itertuples():
+            if r.peptide != r.modified_peptide:
+                n_modified += 1
+                continue
+
+            spectra.append({
+                "dataset": r.dataset,
+                "psmid": r.PSMId,
+                "peptide": r.peptide,
+                "precursor_mz": r.precursor_mz,
+                "precursor_charge": int(r.charge),
+                "mz": r.mz_array.tolist(),
+                "intensity": r.intensity_array.tolist(),
+            })
+            
+            n_selected += 1
+
+            if num_examples is not None and n_selected == num_examples:
+                print(f"Selected {n_selected}, skipped {n_modified} modified peptides")
+                return spectra
+
+    print(f"Selected {n_selected}, skipped {n_modified} modified peptides")
     return spectra
 
-def match_ions(peptide, mz_list, intensity_list, DEFAULT_PEAK_TOLERANCE):
-    b_ions, y_ions = theoretical_ions(peptide)
+def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance):
+    b_ions, y_ions = theoretical_ions(peptide, aa_masses)
 
     matched_b, matched_y, noise = {}, {}, []
     
     for mz, intensity in zip(mz_list, intensity_list):
         hit = False
         for name, tmz in b_ions.items():
-            if abs(mz - tmz) <= DEFAULT_PEAK_TOLERANCE:
+            if abs(mz - tmz) <= fragment_tolerance:
                 matched_b[name] = (mz, intensity); hit = True; break
         if hit:
             continue
         for name, tmz in y_ions.items():
-            if abs(mz - tmz) <= DEFAULT_PEAK_TOLERANCE:
+            if abs(mz - tmz) <= fragment_tolerance:
                 matched_y[name] = (mz, intensity); hit = True; break
         if not hit:
             noise.append((mz, intensity))
@@ -357,6 +421,7 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
     count_precursor_match = 0
     dataset = []
     case_counts = {}
+    params_by_dataset = {}
     n_not_saved = 0
 
     for spec in spectra:
@@ -364,14 +429,17 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
         peptide = spec['peptide']
         mz_list = spec['mz']
         intensity_list = spec['intensity']
+        dataset_name = spec['dataset']
+        if dataset_name not in params_by_dataset:
+            params_by_dataset[dataset_name] = load_search_params(dataset_name)
+        params = params_by_dataset[dataset_name]
 
         if VERBOSE:
             print(f"\n=====NEW PEPTIDE=====")
             print(f"label Peptide: {peptide}")
             print(f"PSM id: {spec['psmid']}")
     
-
-        matched_y, matched_b, noise = match_ions(peptide, mz_list, intensity_list, DEFAULT_PEAK_TOLERANCE)
+        matched_y, matched_b, noise = match_ions(peptide, mz_list, intensity_list, params['aa_masses'], params['fragment_tolerance'])
         
         is_label_match, is_precursor_match, predicted_sequence, reasoning_trace, case_label = derive_peptide(
             matched_y,
@@ -379,6 +447,7 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
             spec['peptide'],
             spec['precursor_mz'],
             spec['precursor_charge'],
+            params,
         )
 
         complete_resoning_trace = '\n'.join(reasoning_trace)
@@ -452,9 +521,9 @@ if __name__ == "__main__":
     parser.add_argument("--input_data_path",
                          default="/disk/raptor-array/mshab008/msbenchmarking/hardness_index_0/filtered_spectra/hardness_index_0.parquet")
     parser.add_argument("--output_path",
-                         default="v2/output/sample_llm_reasoning_corpus.jsonl")
+                         default="v2/output/sample_llm_reasoning_corpus.json")
     parser.add_argument("--num_examples", type=int, default=10,
-                         help="Number of spectra to keep in the output dataset. 0 (default) means all.")
+                         help="Number of spectra to keep in the output dataset.")
     parser.add_argument("--no_save", action="store_true",
                          help="Process spectra without writing a dataset file (stats-only run).")
     parser.add_argument("--verbose", action="store_true")
