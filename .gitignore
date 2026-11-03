@@ -1,0 +1,8 @@
+# Generated corpora
+v2/output/
+v1/output/
+
+# Python
+__pycache__/
+*.pyc
+.venv/

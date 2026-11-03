@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import argparse
+from datetime import datetime
 
 from constants import (
     AA_MASSES, NEUTRAL_LOSS_MASSES, MASS_PROTON,
@@ -556,8 +557,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate the reasoning corpus for LLM to perform de novo peptide sequencing")
     parser.add_argument("--input_data_path",
                          default="/disk/raptor-array/mshab008/msbenchmarking/hardness_index_0/filtered_spectra/hardness_index_0.parquet")
-    parser.add_argument("--output_path",
-                         default="v2/output/sample_llm_reasoning_corpus.json")
+    parser.add_argument("--output_dir",
+                         default="v2/output")
     parser.add_argument("--num_examples", type=int, default=10,
                          help="Number of spectra to keep in the output dataset.")
     parser.add_argument("--no_save", action="store_true",
@@ -566,9 +567,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     input_data_path = args.input_data_path
-    OUTPUT_PATH = args.output_path
     VERBOSE = args.verbose
     NUM_EXAMPLES = args.num_examples if args.num_examples > 0 else None
     SAVE_DATASET = not args.no_save
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    n_tag = "all" if NUM_EXAMPLES is None else NUM_EXAMPLES
+    os.makedirs(args.output_dir, exist_ok=True)
+    OUTPUT_PATH = os.path.join(args.output_dir, f"{timestamp}_{n_tag}_llm_reasoning_corpus.json")
 
     process_input_data(input_data_path, OUTPUT_PATH, NUM_EXAMPLES, SAVE_DATASET)
