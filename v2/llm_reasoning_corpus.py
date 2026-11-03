@@ -12,7 +12,16 @@ from constants import (
     DATASET_METADATA_ROOT,
 )
 
-def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_charge, explain_precursor):
+
+def residue_text(residue, fixed_mods):
+    # Spell out the fixed modifications so the residue mass can be check against the standard table.
+    if residue in fixed_mods:
+        base = AA_MASSES[residue]
+        delta = fixed_mods[residue]
+        return f"{residue} with its fixed modification ({base:.5f} + {delta:.5f} = {base + delta:.5f} Da)"
+    return residue
+
+def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_charge, explain_precursor, fixed_mods):
     precursor_neutral_mass = precursor_mz * precursor_charge - precursor_charge * MASS_PROTON
     residues = list(reversed(label_peptide)) if ion_type == 'y' else list(label_peptide)
     n = len(residues)
@@ -43,7 +52,7 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_
                     traces.append(
                         f"The remaining residue at the N-terminus comes from the precursor. {precursor_text}"
                         f"The neutral peptide mass ({precursor_neutral_mass:.5f} Da) minus y{n-1} ({prev_mass:.5f} Da) plus one proton "
-                        f"({MASS_PROTON:.5f} Da) gives {aa_mass:.5f} Da, which matches the residue mass of {residues[i-1]}."
+                        f"({MASS_PROTON:.5f} Da) gives {aa_mass:.5f} Da, which matches the residue mass of {residue_text(residues[i-1], fixed_mods)}."
                     )
                 else:
                     aa_mass = precursor_neutral_mass - NEUTRAL_LOSS_MASSES['H2O'] - prev_mass + MASS_PROTON
@@ -51,7 +60,7 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_
                         f"The remaining residue at the C-terminus comes from the precursor. {precursor_text}"
                         f"The neutral peptide mass ({precursor_neutral_mass:.5f} Da) minus H2O ({NEUTRAL_LOSS_MASSES['H2O']:.5f} Da), " 
                         f"minus b{n-1} ({prev_mass:.5f} Da), plus one proton ({MASS_PROTON:.5f} Da) gives {aa_mass:.5f} Da, "
-                        f"which matches the residue mass of {residues[i-1]}."
+                        f"which matches the residue mass of {residue_text(residues[i-1], fixed_mods)}."
                     )
                        
                 residues_found.append({"pos": to_pos(i), "method": "precursor"})
@@ -82,16 +91,16 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_
                 aa_mass = ion_mass - NEUTRAL_LOSS_MASSES['H2O'] - MASS_PROTON
                 line += (f" Since y1 contains only the last residue plus H2O and a proton, subtracting H2O "
                 f"({NEUTRAL_LOSS_MASSES['H2O']:.5f} Da) and a proton ({MASS_PROTON:.5f} Da) leaves {aa_mass:.5f} Da, "
-                f"which matches the residue mass of {residues[0]}.")
+                f"which matches the residue mass of {residue_text(residues[0], fixed_mods)}.")
             else:
                 aa_mass = ion_mass - MASS_PROTON
                 line += (f" Since b1 contains only the first residue plus a proton, subtracting the proton "
-                f"({MASS_PROTON:.5f} Da) leaves {aa_mass:.5f} Da, which matches the residue mass of {residues[0]}.")
+                f"({MASS_PROTON:.5f} Da) leaves {aa_mass:.5f} Da, which matches the residue mass of {residue_text(residues[0], fixed_mods)}.")
             residues_found.append({"pos": to_pos(1), "method": "first"})
 
         elif prev_mass is not None:
             line += (f" The mass difference between {ion_type}{i-1} and {ion_type}{i} is {ion_mass:.5f} - {prev_mass:.5f} = "
-            f"{ion_mass - prev_mass:.5f} Da, which matches the residue mass of {residues[i-1]}.")
+            f"{ion_mass - prev_mass:.5f} Da, which matches the residue mass of {residue_text(residues[i-1], fixed_mods)}.")
             residues_found.append({"pos": to_pos(i), "method": "diff"})
 
         traces.append(line)
@@ -99,12 +108,14 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_
 
     return traces, ions, residues_found
 
-def derive_peptide(matched_y, matched_b, label_peptide, precursor_mz, precursor_charge):
-    y_traces, y_ions, y_residues = extend_ladder('y', matched_y, label_peptide, precursor_mz, precursor_charge, explain_precursor=True)
+def derive_peptide(matched_y, matched_b, label_peptide, precursor_mz, precursor_charge, fixed_mods):
+    y_traces, y_ions, y_residues = extend_ladder('y', matched_y, label_peptide, precursor_mz, precursor_charge, 
+                                                 explain_precursor=True, fixed_mods=fixed_mods)
 
     # Explain the precursor conversion in the b ladder only if the y ladder did not already use it.   
     y_used_precursor = any(r['method'] == 'precursor' for r in y_residues)
-    b_traces, b_ions, b_residues = extend_ladder('b', matched_b, label_peptide, precursor_mz, precursor_charge, explain_precursor= not y_used_precursor)
+    b_traces, b_ions, b_residues = extend_ladder('b', matched_b, label_peptide, precursor_mz, precursor_charge, 
+                                                 explain_precursor= not y_used_precursor, fixed_mods=fixed_mods)
 
     intro =(f"To determine the peptide sequence, I derive residues from the y-ion ladder, starting at the C-terminus, "
             "and then the b-ion ladder, starting at the N-terminus. Each residue is identified from the mass " 
@@ -131,10 +142,13 @@ def derive_peptide(matched_y, matched_b, label_peptide, precursor_mz, precursor_
 
     return label_peptide, reasoning_trace, ladder_info
     
-def spectrum_to_input_text(mz_list, intensity_list, precursor_mz, precursor_charge):
+def spectrum_to_input_text(mz_list, intensity_list, precursor_mz, precursor_charge, fixed_mods, fragment_tolerance):
     unique_peaks = sorted(set(zip(mz_list, intensity_list)), key=lambda p: p[0])
     # peaks = sorted(zip(mz_list, intensity_list), key=lambda p: p[0])
-    lines = [f"Precursor mz: {precursor_mz:.5f} Da, Precursor Charge: {precursor_charge}"]
+    mods_text = ", ".join(f"{aa} +{delta:.5f} Da" for aa, delta in fixed_mods.items()) or "none"
+    lines = [f"Precursor m/z: {precursor_mz:.5f}, Precursor charge: {precursor_charge}+"]
+    lines.append(f"Fixed modifications: {mods_text}")
+    lines.append(f"Fragment mass tolerance: {fragment_tolerance:g} Da")
     lines += ["Experimental MS/MS spectrum (m/z, intensity):"]
     lines += [f"m/z {mz:.5f}, intensity {intensity:.5f}" for mz, intensity in unique_peaks]
     lines.append("Analyze this spectrum and identify the most likely peptide sequence.")
@@ -162,6 +176,7 @@ def load_search_params(dataset):
         metadata = json.load(f)
 
     aa_masses = dict(AA_MASSES)
+    fixed_mods = {}
     for entry in metadata.get('modifications', '').split(','):
         entry = entry.strip()
         if not entry:
@@ -172,6 +187,7 @@ def load_search_params(dataset):
         residues, delta = m.groups()
         for aa in residues:
             aa_masses[aa] += float(delta)
+            fixed_mods[aa] = fixed_mods.get(aa, 0.0) + float(delta)
 
 
     return {
@@ -179,6 +195,7 @@ def load_search_params(dataset):
         'fragment_tolerance': float(metadata['Fragment_Tolerance']),
         'precursor_window': float(metadata['Precursor_mz_Tolerance']),
         'precursor_window_type': metadata['Precursor_mz_Unit'].strip().lower(),
+        'fixed_mods': fixed_mods,
     }
 
 # Parse PARQUET file and extract spectrum data
@@ -284,6 +301,7 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
             peptide,
             spec['precursor_mz'],
             spec['precursor_charge'],
+            params['fixed_mods']
         )
 
         if VERBOSE:
@@ -298,7 +316,10 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
                 spec['mz'], 
                 spec['intensity'], 
                 spec['precursor_mz'], 
-                spec['precursor_charge'],),
+                spec['precursor_charge'],
+                params['fixed_mods'],
+                params['fragment_tolerance']
+                ),
             'output': '\n'.join(reasoning_trace),
             'peptide': peptide,
             **ladder_info,
