@@ -6,6 +6,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import argparse
 from datetime import datetime
+from collections import defaultdict
 
 from constants import (
     AA_MASSES, NEUTRAL_LOSS_MASSES, MASS_PROTON,
@@ -68,9 +69,9 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_
             prev_mass = None
             continue
 
-        (mz, intensity, charge, loss) = peak_information
-        ions.append({"ion":f"{ion_type}{i}", "mz": round(float(mz), 5), "intensity": round(float(intensity), 5),  
-                    "charge": charge, "loss": loss})
+        (mz, intensity, charge, loss, tmz) = peak_information
+        ions.append({"ion":f"{ion_type}{i}", "mz": round(float(mz), 5), "theoretical_mz": round(float(tmz), 5), 
+                    "intensity": round(float(intensity), 5) , "charge": charge, "loss": loss})
         
         ion_mass = mz * charge - (charge - 1) * MASS_PROTON
         if charge > 1:
@@ -253,24 +254,24 @@ def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance, 
         for peak_idx, (mz, intensity) in enumerate(peaks):
             error = abs(mz-tmz)
             if error <= fragment_tolerance:
-                candidates.append((loss_rank, charge, error, -intensity, name, loss, peak_idx))
+                candidates.append((loss_rank, charge, error, -intensity, name, loss, peak_idx, tmz))
 
     # Intact before neutral loss, lower charge first, then closest, then most intense; 
     # each ion and each peak used at most once
     candidates.sort()
     assigned, assigned_peaks = {}, set()
-    for loss_rank, charge, error, _, name, loss, peak_idx in candidates:
+    for loss_rank, charge, error, _, name, loss, peak_idx, tmz in candidates:
         if (name, charge, loss) in assigned or peak_idx in assigned_peaks:
             continue
-        assigned[(name, charge, loss)] = peaks[peak_idx]
+        assigned[(name, charge, loss)] = (*peaks[peak_idx], tmz)
         assigned_peaks.add(peak_idx)
 
     # One peak per ladder position: prefer intact over neutral loss, then the lowest charge
     matched_b, matched_y = {}, {}
-    for (name, charge, loss), (mz, intensity) in sorted(assigned.items(), key=lambda kv: (kv[0][2] is not None, kv[0][1])):
+    for (name, charge, loss), (mz, intensity, tmz) in sorted(assigned.items(), key=lambda kv: (kv[0][2] is not None, kv[0][1])):
         target = matched_b if name.startswith('b') else matched_y
         if name not in target:
-            target[name] = (mz, intensity, charge, loss)
+            target[name] = (mz, intensity, charge, loss, tmz)
 
     noise = [peak for idx, peak in enumerate(peaks) if idx not in assigned_peaks]
 
@@ -279,10 +280,58 @@ def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance, 
 def normalize(s):
     return s.replace('I', 'L')
 
+def spectrum_stats(peptide, ladder_info):
+    n = len(peptide)
+    n_b, n_y = len(ladder_info['b_ions']), len(ladder_info['y_ions'])
+    supported = {r['pos'] for r in ladder_info['y_residues'] + ladder_info['b_residues']}
+    errors = [abs(ion['mz'] - ion['theoretical_mz']) for ion in ladder_info['b_ions'] + ladder_info['y_ions']]
+
+    return {
+        'b_coverage': 100 * n_b / (n-1),
+        'y_coverage': 100 * n_y / (n-1),
+        'ion_coverage': 100 * (n_b + n_y) / (2 * (n-1)),
+        'residue_coverage': 100 * len(supported) / n,
+        'fully_supported': len(supported) == n,
+        'fragment_errors': errors,
+    }
+
+def print_stats(stats):
+    names = sorted(k for k in stats if k != 'all') + ['all']
+
+    print("\nIon coverage (observed / expected b and y ions):")
+    print(f"{'dataset':10s} {'n':>6s} {'b mean':>8s} {'b median':>9s} {'b complete':>11s} "
+          f"{'y mean':>8s} {'y median':>9s} {'y complete':>11s} {'b+y mean':>9s}"
+          )
+    for name in names:
+        s = stats[name]
+        b, y = np.array(s['b_coverage']), np.array(s['y_coverage'])
+        print(f"{name:10s} {len(b):6d} {b.mean():7.1f}% {np.median(b):8.1f}% {100 * (b == 100).mean():10.1f}% "
+              f"{y.mean():7.1f}% {np.median(y):8.1f}% {100 * (y == 100).mean():10.1f}% {np.mean(s['ion_coverage']):8.1f}%"          
+              )
+
+    print("\nResidue coverage and fragment mass error:")
+    print(f"{'dataset':10s} {'n':>6s} {'residue cov':>12s} {'fully supported':>16s} {'err med':>9s} {'err p95':>9s}")
+    for name in names:
+        s = stats[name]
+        errors = np.array(s['fragment_errors'])
+        print(f"{name:10s} {len(s['residue_coverage']):6d} {np.mean(s['residue_coverage']):11.1f}% "
+              f"{100 * np.mean(s['fully_supported']):15.1f}% {np.median(errors):9.4f} {np.percentile(errors, 95):9.4f}"
+              )
+
+def add_stats(stats, dataset, spec_stats):
+    for key in (dataset, 'all'):
+        for metric, value in spec_stats.items():
+            if metric == 'fragment_errors':
+                stats[key][metric].extend(value)
+            else:
+                stats[key][metric].append(value)
+
+
 def process_input_data(input_data_path, output_path, num_examples, save_dataset):
     spectra = parse_parquet(input_data_path, num_examples)
     records = []
     params_by_dataset = {}
+    stats = defaultdict(lambda: defaultdict(list))
 
     for total, spec in enumerate(spectra, start=1):
         peptide = spec['peptide']
@@ -303,6 +352,8 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
             spec['precursor_charge'],
             params['fixed_mods']
         )
+
+        add_stats(stats, dataset_name, spectrum_stats(peptide, ladder_info))
 
         if VERBOSE:
             print(f"\n==== {spec['psmid']} | {peptide} ====")
@@ -335,6 +386,8 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
         with open(output_path, 'w') as f:
             json.dump(records, f, indent=2)
         print(f"Saved {len(records)} training examples to {output_path}")
+
+    print_stats(stats)
 
 if __name__ == "__main__":
 
