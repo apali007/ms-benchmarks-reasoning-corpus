@@ -128,3 +128,9 @@ SAMPLE_INPUT = "Precursor mz: 590.27440 Da, Precursor Charge: 3, Mass Analyzer: 
     "mass_analyzer": "FTMS"
   },
 '''
+
+# Variable modifications: delta as written in modified_peptide -> (name, exact mass)
+VARIABLE_MODS = {
+    '15.9949': ('oxidation', 15.994915),
+    '42.0106': ('acetylation', 42.010565),
+}

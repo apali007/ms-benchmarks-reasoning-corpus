@@ -10,17 +10,40 @@ from collections import defaultdict
 
 from constants import (
     AA_MASSES, NEUTRAL_LOSS_MASSES, MASS_PROTON,
-    DATASET_METADATA_ROOT,
+    DATASET_METADATA_ROOT, VARIABLE_MODS
 )
 
+def tokenize_peptide(modified_peptide):
+    # One token per residue, keeping its modification, GM[15.9949]K -> ['G', 'M[15.9949]', 'K']
+    return re.findall(r'[A-Z](?:\[[^\]]+\])*', modified_peptide)
+
+def add_modified_residues(aa_masses, tokens):
+    #Add a mass entry for each modified residue in this peptide
+    masses = dict(aa_masses)
+    for token in tokens:
+        if '[' in token:
+            deltas = re.findall(r'\[([^\]]+)\]', token)
+            masses[token] = aa_masses[token[0]] + sum(VARIABLE_MODS[delta][1] for delta in deltas)
+
+    return masses
 
 def residue_text(residue, fixed_mods):
-    # Spell out the fixed modifications so the residue mass can be check against the standard table.
-    if residue in fixed_mods:
-        base = AA_MASSES[residue]
-        delta = fixed_mods[residue]
-        return f"{residue} with its fixed modification ({base:.5f} + {delta:.5f} = {base + delta:.5f} Da)"
-    return residue
+    # Spell out any modifications so the residue mass can be checked against the standard table.
+    aa = residue[0]
+    labels, masses = [], [AA_MASSES[aa]]
+    if aa in fixed_mods:
+        labels.append("its fixed modification")
+        masses.append(fixed_mods[aa])
+    for delta in re.findall(r'\[([^\]]+)\]', residue):
+        name, mass = VARIABLE_MODS[delta]
+        labels.append(name)
+        masses.append(mass)
+
+    if not labels:
+        return residue
+
+    mass_text = " + ".join(f"{mass:.5f}" for mass in masses)
+    return f"{aa} with {' and '.join(labels)} ({mass_text} = {sum(masses):.5f} Da)"
 
 def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_charge, explain_precursor, fixed_mods):
     precursor_neutral_mass = precursor_mz * precursor_charge - precursor_charge * MASS_PROTON
@@ -215,12 +238,12 @@ def parse_parquet(parquet_path, num_examples=100):
         for r in df.itertuples():
             if r.peptide != r.modified_peptide:
                 n_modified += 1
-                continue
 
             spectra.append({
                 "dataset": r.dataset,
                 "psmid": r.PSMId,
                 "peptide": r.peptide,
+                "modified_peptide": r.modified_peptide,
                 "precursor_mz": r.precursor_mz,
                 "precursor_charge": int(r.charge),
                 "mz": r.mz_array.tolist(),
@@ -230,10 +253,10 @@ def parse_parquet(parquet_path, num_examples=100):
             n_selected += 1
 
             if num_examples is not None and n_selected == num_examples:
-                print(f"Selected {n_selected}, skipped {n_modified} modified peptides")
+                print(f"Selected {n_selected}, including {n_modified} modified peptides")
                 return spectra
 
-    print(f"Selected {n_selected}, skipped {n_modified} modified peptides")
+    print(f"Selected {n_selected}, including {n_modified} modified peptides")
     return spectra
 
 def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance, max_fragment_charge):
@@ -340,14 +363,17 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
             params_by_dataset[dataset_name] = load_search_params(dataset_name)
         params = params_by_dataset[dataset_name]
 
+        tokens = tokenize_peptide(spec['modified_peptide'])
+        aa_masses = add_modified_residues(params['aa_masses'], tokens)
+
         matched_y, matched_b, annotations, noise = match_ions(
-            peptide, spec['mz'], spec['intensity'], 
-            params['aa_masses'], params['fragment_tolerance'], spec['precursor_charge'])
+            tokens, spec['mz'], spec['intensity'], 
+            aa_masses, params['fragment_tolerance'], spec['precursor_charge'])
         
         final_sequence, reasoning_trace, ladder_info = derive_peptide(
             matched_y,
             matched_b,
-            peptide,
+            tokens,
             spec['precursor_mz'],
             spec['precursor_charge'],
             params['fixed_mods']
@@ -356,7 +382,7 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
         add_stats(stats, dataset_name, spectrum_stats(peptide, ladder_info))
 
         if VERBOSE:
-            print(f"\n==== {spec['psmid']} | {peptide} ====")
+            print(f"\n==== {spec['psmid']} | {spec['modified_peptide']} ====")
             print('\n'.join(reasoning_trace))
 
         if save_dataset:
@@ -373,6 +399,7 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
                 ),
             'output': '\n'.join(reasoning_trace),
             'peptide': peptide,
+            'modified_peptide': spec['modified_peptide'],
             **ladder_info,
             })
 
