@@ -9,12 +9,13 @@ if __name__ == "__main__":
     parser.add_argument("corpus_path")
     args = parser.parse_args()
 
-    with open(args.corpus_path) as f:
-        records = json.load(f)
-
     stats = defaultdict(lambda: defaultdict(list))
-    for record in records:
-        add_stats(stats, record['dataset'], spectrum_stats(record['modified_peptide'], record))
+    n = 0
+    with open(args.corpus_path) as f:
+        for line in f:
+            record = json.loads(line)
+            add_stats(stats, record['dataset'], spectrum_stats(record['modified_peptide'], record))
+            n += 1
 
-    print(f"Loaded {len(records)} records from {args.corpus_path}")
+    print(f"Loaded {n} records from {args.corpus_path}")
     print_stats(stats)

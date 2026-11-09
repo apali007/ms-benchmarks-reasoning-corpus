@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import argparse
-from datetime import datetime
 from collections import Counter, defaultdict
 
 from constants import (
@@ -414,7 +413,7 @@ def add_stats(stats, dataset, spec_stats):
 
 def process_input_data(input_data_path, output_path, num_examples, save_dataset):
     spectra = parse_parquet(input_data_path, num_examples)
-    records = []
+    out = open(output_path, 'w') if save_dataset else None
     params_by_dataset = {}
     stats = defaultdict(lambda: defaultdict(list))
 
@@ -448,7 +447,7 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
             print('\n'.join(reasoning_trace))
 
         if save_dataset:
-            records.append({
+            record = {
             'id': spec['psmid'],
             'dataset': dataset_name,
             'input': spectrum_to_input_text(
@@ -464,18 +463,16 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
             'peptide': peptide,
             'modified_peptide': spec['modified_peptide'],
             **ladder_info,
-            })
+            }
+            out.write(json.dumps(record) + '\n')
 
-            if total % 1000 == 0:
-                with open(output_path, 'w') as f:
-                    json.dump(records, f, indent=2)
-                print(f"Progress: {total} processed")
+        if total % 1000 == 0:
+            print(f"Progress: {total} processed")
 
     print(f"\nProcessed {len(spectra)} spectra")
     if save_dataset:
-        with open(output_path, 'w') as f:
-            json.dump(records, f, indent=2)
-        print(f"Saved {len(records)} training examples to {output_path}")
+        out.close()
+        print(f"Saved {len(spectra)} training examples to {output_path}")
 
     print_stats(stats)
 
@@ -498,9 +495,8 @@ if __name__ == "__main__":
     NUM_EXAMPLES = args.num_examples if args.num_examples > 0 else None
     SAVE_DATASET = not args.no_save
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    n_tag = "all" if NUM_EXAMPLES is None else NUM_EXAMPLES
+    input_name = os.path.splitext(os.path.basename(input_data_path))[0]
     os.makedirs(args.output_dir, exist_ok=True)
-    OUTPUT_PATH = os.path.join(args.output_dir, f"{timestamp}_{n_tag}_llm_reasoning_corpus.json")
+    OUTPUT_PATH = os.path.join(args.output_dir, f"{input_name}.jsonl")
 
     process_input_data(input_data_path, OUTPUT_PATH, NUM_EXAMPLES, SAVE_DATASET)
