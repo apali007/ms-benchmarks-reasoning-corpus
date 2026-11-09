@@ -134,3 +134,5 @@ VARIABLE_MODS = {
     '15.9949': ('oxidation', 15.994915),
     '42.0106': ('acetylation', 42.010565),
 }
+
+SEARCH_OUTPUT_ROOT = "/disk/raptor-array/SaeedLab-Data/Mass-Spec/Benchmarking_Proteomics/5_Experiment_Outputs/hardness_index_0"

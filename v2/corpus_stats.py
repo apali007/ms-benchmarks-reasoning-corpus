@@ -14,7 +14,7 @@ if __name__ == "__main__":
 
     stats = defaultdict(lambda: defaultdict(list))
     for record in records:
-        add_stats(stats, record['dataset'], spectrum_stats(record['peptide'], record))
+        add_stats(stats, record['dataset'], spectrum_stats(record['modified_peptide'], record))
 
     print(f"Loaded {len(records)} records from {args.corpus_path}")
     print_stats(stats)

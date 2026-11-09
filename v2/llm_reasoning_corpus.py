@@ -6,11 +6,11 @@ import pandas as pd
 import pyarrow.parquet as pq
 import argparse
 from datetime import datetime
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from constants import (
     AA_MASSES, NEUTRAL_LOSS_MASSES, MASS_PROTON,
-    DATASET_METADATA_ROOT, VARIABLE_MODS
+    DATASET_METADATA_ROOT, VARIABLE_MODS, SEARCH_OUTPUT_ROOT
 )
 
 def tokenize_peptide(modified_peptide):
@@ -53,6 +53,7 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_
     ions = []
     residues_found = []
     prev_mass = None
+    ptms_explained = set()
 
     # Position from N-terminus (1-based), so y and b refer to the same residue numbering
     def to_pos(i):
@@ -109,7 +110,26 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_
             line += (f" This peak has lost {loss} ({loss_mass:.5f} Da), "
                      f"so adding it back gives {ion_mass + loss_mass:.5f} Da.")
             ion_mass +=loss_mass
-            
+
+        # Name the PTMs on the first observed ion that contains them, as later ions contain them too.
+        new_ptms = []
+        for j, token in enumerate(residues[:i], start=1):
+            if j in ptms_explained:
+                continue
+            ptms_explained.add(j)
+            new_ptms += re.findall(r'\[([^\]]+)\]', token)
+
+        if new_ptms:
+            parts = []
+            for delta, count in Counter(new_ptms).items():
+                name, mass = VARIABLE_MODS[delta]
+                if count == 1:
+                    parts.append(f"{name} (+{mass:.5f} Da)")
+                else:
+                    parts.append(f"{count} {name}s ({count} x {mass:.5f} = {count * mass:.5f} Da)")
+
+            line += f" This ion carries {' and '.join(parts)}."
+        
         if i == 1: 
             if ion_type == 'y':
                 aa_mass = ion_mass - NEUTRAL_LOSS_MASSES['H2O'] - MASS_PROTON
@@ -166,20 +186,18 @@ def derive_peptide(matched_y, matched_b, label_peptide, precursor_mz, precursor_
 
     return label_peptide, reasoning_trace, ladder_info
     
-def spectrum_to_input_text(mz_list, intensity_list, precursor_mz, precursor_charge, fixed_mods, fragment_tolerance):
+def spectrum_to_input_text(mz_list, intensity_list, precursor_mz, precursor_charge, fixed_mods, variable_mods, fragment_tolerance):
     unique_peaks = sorted(set(zip(mz_list, intensity_list)), key=lambda p: p[0])
     # peaks = sorted(zip(mz_list, intensity_list), key=lambda p: p[0])
     mods_text = ", ".join(f"{aa} +{delta:.5f} Da" for aa, delta in fixed_mods.items()) or "none"
     lines = [f"Precursor m/z: {precursor_mz:.5f}, Precursor charge: {precursor_charge}+"]
     lines.append(f"Fixed modifications: {mods_text}")
+    lines.append(f"Variable modifications: {', '.join(variable_mods) or 'none'}")
     lines.append(f"Fragment mass tolerance: {fragment_tolerance:g} Da")
     lines += ["Experimental MS/MS spectrum (m/z, intensity):"]
     lines += [f"m/z {mz:.5f}, intensity {intensity:.5f}" for mz, intensity in unique_peaks]
     lines.append("Analyze this spectrum and identify the most likely peptide sequence.")
     return "\n".join(lines)
-
-def is_valid_peptide(peptide):
-    return bool(peptide) and bool(re.fullmatch(r'[A-Z]+', peptide)) and all(aa in AA_MASSES for aa in peptide)
 
 # Compute theoretical b and y ions for a peptide sequence
 def theoretical_ions(peptide, aa_masses, charge=1):
@@ -194,7 +212,38 @@ def theoretical_ions(peptide, aa_masses, charge=1):
         y_ions[f"y{len(peptide)-i}"] = (mass + NEUTRAL_LOSS_MASSES['H2O'] + charge * MASS_PROTON) / charge
     return b_ions, y_ions
 
+def load_variable_mods(dataset):
+        # The metadata JSON has no variable modifications, so read them from the Tide search settings
+    params_path = os.path.join(SEARCH_OUTPUT_ROOT, dataset, 'tide-output', 'combined', 'tide-search.params.txt')
+    with open(params_path) as f:
+        settings = dict(line.strip().split('=', 1) for line in f if '=' in line and not line.startswith('#'))
+
+    sites = {
+        'mods-spec': None,
+        'nterm-peptide-mods-spec': 'N-terminus',
+        'cterm-peptide-mods-spec': 'C-terminus',
+        'nterm-protein-mods-spec': 'protein-N-terminus',
+        'cterm-protein-mods-spec': 'protein C-terminus',
+    }
+
+    variable_mods = []
+    for key, site in sites.items():
+        for entry in settings.get(key, '').split(','):
+            # A leading number marks a variable modification; without one it is static
+            m = re.match(r'^\d+([A-Z]+)([+-][\d.]+)$', entry.strip())
+            if m is None:
+                continue
+            residues, delta = m.groups()
+            if site is None:
+                target = residues
+            else:
+                target = site if residues == 'X' else f"{residues} at {site}"
+            variable_mods.append(f"{target} {float(delta):+.5f} Da")
+
+    return variable_mods
+
 def load_search_params(dataset):
+
     metadata_path = os.path.join(DATASET_METADATA_ROOT, f"{dataset}.json")
     with open(metadata_path) as f:
         metadata = json.load(f)
@@ -220,6 +269,7 @@ def load_search_params(dataset):
         'precursor_window': float(metadata['Precursor_mz_Tolerance']),
         'precursor_window_type': metadata['Precursor_mz_Unit'].strip().lower(),
         'fixed_mods': fixed_mods,
+        'variable_mods': load_variable_mods(dataset)
     }
 
 # Parse PARQUET file and extract spectrum data
@@ -300,11 +350,9 @@ def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance, 
 
     return matched_y, matched_b, assigned, noise
 
-def normalize(s):
-    return s.replace('I', 'L')
-
-def spectrum_stats(peptide, ladder_info):
-    n = len(peptide)
+def spectrum_stats(modified_peptide, ladder_info):
+    tokens = tokenize_peptide(modified_peptide)
+    n = len(tokens)
     n_b, n_y = len(ladder_info['b_ions']), len(ladder_info['y_ions'])
     supported = {r['pos'] for r in ladder_info['y_residues'] + ladder_info['b_residues']}
     errors = [abs(ion['mz'] - ion['theoretical_mz']) for ion in ladder_info['b_ions'] + ladder_info['y_ions']]
@@ -316,33 +364,47 @@ def spectrum_stats(peptide, ladder_info):
         'residue_coverage': 100 * len(supported) / n,
         'fully_supported': len(supported) == n,
         'fragment_errors': errors,
+        'modified': '[' in modified_peptide,
     }
 
-def print_stats(stats):
-    names = sorted(k for k in stats if k != 'all') + ['all']
-
+def print_tables(stats, rows):
+    # rows: (label, key in stats) pairs, one table row each
     print("\nIon coverage (observed / expected b and y ions):")
     print(f"{'dataset':10s} {'n':>6s} {'b mean':>8s} {'b median':>9s} {'b complete':>11s} "
-          f"{'y mean':>8s} {'y median':>9s} {'y complete':>11s} {'b+y mean':>9s}"
-          )
-    for name in names:
-        s = stats[name]
+            f"{'y mean':>8s} {'y median':>9s} {'y complete':>11s} {'b+y mean':>9s}"
+            )
+    for label, key in rows:
+        s = stats[key]
         b, y = np.array(s['b_coverage']), np.array(s['y_coverage'])
-        print(f"{name:10s} {len(b):6d} {b.mean():7.1f}% {np.median(b):8.1f}% {100 * (b == 100).mean():10.1f}% "
-              f"{y.mean():7.1f}% {np.median(y):8.1f}% {100 * (y == 100).mean():10.1f}% {np.mean(s['ion_coverage']):8.1f}%"          
-              )
+        print(f"{label:10s} {len(b):6d} {b.mean():7.1f}% {np.median(b):8.1f}% {100 * (b == 100).mean():10.1f}% "
+                f"{y.mean():7.1f}% {np.median(y):8.1f}% {100 * (y == 100).mean():10.1f}% {np.mean(s['ion_coverage']):8.1f}%"          
+                )
 
     print("\nResidue coverage and fragment mass error:")
     print(f"{'dataset':10s} {'n':>6s} {'residue cov':>12s} {'fully supported':>16s} {'err med':>9s} {'err p95':>9s}")
-    for name in names:
-        s = stats[name]
+    for label, key in rows:
+        s = stats[key]
         errors = np.array(s['fragment_errors'])
-        print(f"{name:10s} {len(s['residue_coverage']):6d} {np.mean(s['residue_coverage']):11.1f}% "
-              f"{100 * np.mean(s['fully_supported']):15.1f}% {np.median(errors):9.4f} {np.percentile(errors, 95):9.4f}"
-              )
+        print(f"{label:10s} {len(s['residue_coverage']):6d} {np.mean(s['residue_coverage']):11.1f}% "
+                f"{100 * np.mean(s['fully_supported']):15.1f}% {np.median(errors):9.4f} {np.percentile(errors, 95):9.4f}"
+                )
+
+
+def print_stats(stats):
+    datasets = sorted(k for k in stats if isinstance(k, str) and k != 'all')
+    print_tables(stats, [(name, name) for name in datasets + ['all']])
+
+    # Compared within a dataset only, because datasets differ in more than their PTMs
+    for dataset in datasets:
+        if (dataset, 'modified') not in stats:
+            continue
+        print(f"\n==== {dataset}: unmodified vs modified ====")
+        groups = [group for group in ('unmodified', 'modified') if (dataset, group) in stats]
+        print_tables(stats, [(group, (dataset, group)) for group in groups])
 
 def add_stats(stats, dataset, spec_stats):
-    for key in (dataset, 'all'):
+    group = 'modified' if spec_stats['modified'] else 'unmodified'
+    for key in (dataset, 'all', (dataset, group)):
         for metric, value in spec_stats.items():
             if metric == 'fragment_errors':
                 stats[key][metric].extend(value)
@@ -379,7 +441,7 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
             params['fixed_mods']
         )
 
-        add_stats(stats, dataset_name, spectrum_stats(peptide, ladder_info))
+        add_stats(stats, dataset_name, spectrum_stats(spec['modified_peptide'], ladder_info))
 
         if VERBOSE:
             print(f"\n==== {spec['psmid']} | {spec['modified_peptide']} ====")
@@ -395,6 +457,7 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
                 spec['precursor_mz'], 
                 spec['precursor_charge'],
                 params['fixed_mods'],
+                params['variable_mods'],
                 params['fragment_tolerance']
                 ),
             'output': '\n'.join(reasoning_trace),
