@@ -450,7 +450,7 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
             record = {
             'id': spec['psmid'],
             'dataset': dataset_name,
-            'input': spectrum_to_input_text(
+            'spectrum': spectrum_to_input_text(
                 spec['mz'], 
                 spec['intensity'], 
                 spec['precursor_mz'], 
@@ -459,7 +459,7 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
                 params['variable_mods'],
                 params['fragment_tolerance']
                 ),
-            'output': '\n'.join(reasoning_trace),
+            'reasoning_trace': '\n'.join(reasoning_trace),
             'peptide': peptide,
             'modified_peptide': spec['modified_peptide'],
             **ladder_info,
@@ -494,7 +494,6 @@ if __name__ == "__main__":
     VERBOSE = args.verbose
     NUM_EXAMPLES = args.num_examples if args.num_examples > 0 else None
     SAVE_DATASET = not args.no_save
-
     input_name = os.path.splitext(os.path.basename(input_data_path))[0]
     os.makedirs(args.output_dir, exist_ok=True)
     OUTPUT_PATH = os.path.join(args.output_dir, f"{input_name}.jsonl")

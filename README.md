@@ -52,7 +52,7 @@ python v2/corpus_stats.py <corpus.jsonl>
 
 ## Output record (one JSON object per line)
 
-`id`, `dataset`, `input` (precursor, mods, tolerance, peak list), `output`
+`id`, `dataset`, `spectrum` (precursor, mods, tolerance, peak list), `reasoning_trace`
 (the reasoning trace), `peptide`, `modified_peptide`, `y_ions` / `b_ions`
 (matched peaks with theoretical m/z, charge, loss), `y_residues` /
 `b_residues` (position and how each residue was identified).
