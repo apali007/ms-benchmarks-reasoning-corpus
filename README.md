@@ -27,7 +27,9 @@ v2/
 3. `tokenize_peptide` / `add_modified_residues`: split the modified peptide
    into residues, each with its own mass (e.g. `M[15.9949]`).
 4. `match_ions`: match observed peaks to b/y ions (charges 1..z, H2O/NH3 losses).
-5. `derive_peptide` / `extend_ladder`: write the y ladder, then the b ladder.
+5. `build_ladder`: compute every number for the y and b ladders (charge
+   conversion, losses, PTMs, residue masses) as a list of steps.
+   `render_ladder`: write the trace text from those steps only.
    Residues are named only from the first ion, a mass difference, or the
    precursor; PTMs are named on the first ion that carries them.
 6. `spectrum_stats` / `print_stats`: ion and residue coverage, fragment
@@ -37,7 +39,7 @@ v2/
 
 Test locally:
 ```bash
-python v2/llm_reasoning_corpus.py --num_examples 100   # writes v2/output/hardness_index_0.jsonl
+python v2/llm_reasoning_corpus.py --num_examples 100   # writes v2/output/<timestamp>_100_llm_reasoning_corpus.jsonl
 ```
 
 Full corpus:
@@ -53,6 +55,6 @@ python v2/corpus_stats.py <corpus.jsonl>
 ## Output record (one JSON object per line)
 
 `id`, `dataset`, `spectrum` (precursor, mods, tolerance, peak list), `reasoning_trace`
-(the reasoning trace), `peptide`, `modified_peptide`, `y_ions` / `b_ions`
-(matched peaks with theoretical m/z, charge, loss), `y_residues` /
-`b_residues` (position and how each residue was identified).
+(the reasoning trace), `peptide`, `modified_peptide`, `y_steps` / `b_steps`
+(every number behind the trace, one step per observed ion: m/z, charge,
+loss, PTMs, and how each residue was identified).

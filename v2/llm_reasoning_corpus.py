@@ -6,6 +6,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import argparse
 from collections import Counter, defaultdict
+from datetime import datetime
 
 from constants import (
     AA_MASSES, NEUTRAL_LOSS_MASSES, MASS_PROTON,
@@ -26,31 +27,32 @@ def add_modified_residues(aa_masses, tokens):
 
     return masses
 
-def residue_text(residue, fixed_mods):
-    # Spell out any modifications so the residue mass can be checked against the standard table.
+def residue_parts(residue, fixed_mods):
+    # Mass components of a residue: [(label, mass)], the unmodified residue first
     aa = residue[0]
-    labels, masses = [], [AA_MASSES[aa]]
+    parts = [(aa, AA_MASSES[aa])]
     if aa in fixed_mods:
-        labels.append("its fixed modification")
-        masses.append(fixed_mods[aa])
+        parts.append(("its fixed modification", fixed_mods[aa]))
     for delta in re.findall(r'\[([^\]]+)\]', residue):
         name, mass = VARIABLE_MODS[delta]
-        labels.append(name)
-        masses.append(mass)
-
-    if not labels:
+        parts.append((name, mass))
+    return parts
+                            
+def residue_text(residue, fixed_mods):
+    # Spell out any modifications so the residue mass can be checked against the standard table.
+    parts = residue_parts(residue, fixed_mods)
+    if len(parts) == 1:
         return residue
+    labels = [label for label, _ in parts[1:]]
+    mass_text = " + ".join(f"{mass:.5f}" for _, mass in parts)
+    return f"{parts[0][0]} with {' and '.join(labels)} ({mass_text} = {sum(m for _, m in parts):.5f} Da)"
 
-    mass_text = " + ".join(f"{mass:.5f}" for mass in masses)
-    return f"{aa} with {' and '.join(labels)} ({mass_text} = {sum(masses):.5f} Da)"
-
-def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_charge, explain_precursor, fixed_mods):
+def build_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_charge, fixed_mods):
+    # Numbers only: one step per observed ion, plus one a precursor-derived terminal residue
     precursor_neutral_mass = precursor_mz * precursor_charge - precursor_charge * MASS_PROTON
     residues = list(reversed(label_peptide)) if ion_type == 'y' else list(label_peptide)
     n = len(residues)
-    traces = []
-    ions = []
-    residues_found = []
+    steps = []
     prev_mass = None
     ptms_explained = set()
 
@@ -64,51 +66,34 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_
         if peak_information is None:
             # The full length ion is never observed; recover the last residue from the precursor
             if i == n and prev_mass is not None:
-                if explain_precursor:
-                    precursor_text = (f"The neutral peptide mass is computed from the precursor m/z ({precursor_mz:.5f}) and charge "
-                                      f"({precursor_charge}+): {precursor_mz:.5f} x {precursor_charge} - {precursor_charge} x "
-                                      f"{MASS_PROTON:.5f} = {precursor_neutral_mass:.5f} Da. "
-                                      )
-                else:
-                    precursor_text = ""
                 if ion_type == 'y':
                     aa_mass = precursor_neutral_mass - prev_mass + MASS_PROTON
-                    traces.append(
-                        f"The remaining residue at the N-terminus comes from the precursor. {precursor_text}"
-                        f"The neutral peptide mass ({precursor_neutral_mass:.5f} Da) minus y{n-1} ({prev_mass:.5f} Da) plus one proton "
-                        f"({MASS_PROTON:.5f} Da) gives {aa_mass:.5f} Da, which matches the residue mass of {residue_text(residues[i-1], fixed_mods)}."
-                    )
                 else:
                     aa_mass = precursor_neutral_mass - NEUTRAL_LOSS_MASSES['H2O'] - prev_mass + MASS_PROTON
-                    traces.append(
-                        f"The remaining residue at the C-terminus comes from the precursor. {precursor_text}"
-                        f"The neutral peptide mass ({precursor_neutral_mass:.5f} Da) minus H2O ({NEUTRAL_LOSS_MASSES['H2O']:.5f} Da), " 
-                        f"minus b{n-1} ({prev_mass:.5f} Da), plus one proton ({MASS_PROTON:.5f} Da) gives {aa_mass:.5f} Da, "
-                        f"which matches the residue mass of {residue_text(residues[i-1], fixed_mods)}."
-                    )
-                       
-                residues_found.append({"pos": to_pos(i), "method": "precursor"})
-
+                steps.append({
+                    "method": "precursor", "ion_type": ion_type, "prev_ion": f"{ion_type}{n-1}",
+                    "prev_mass": prev_mass, "precursor_mz": precursor_mz, "precursor_charge": precursor_charge,
+                    "neutral_mass": precursor_neutral_mass, "residue_mass": aa_mass,
+                    "residue": residues[i-1],
+                    "pos": to_pos(i)
+                })
+    
             prev_mass = None
             continue
 
         (mz, intensity, charge, loss, tmz) = peak_information
-        ions.append({"ion":f"{ion_type}{i}", "mz": round(float(mz), 5), "theoretical_mz": round(float(tmz), 5), 
-                    "intensity": round(float(intensity), 5) , "charge": charge, "loss": loss})
-        
+        step = {
+            "ion": f"{ion_type}{i}", "mz": float(mz), "theoretical_mz": float(tmz), 
+            "intensity": float(intensity), "charge": charge, "loss": loss,
+        }
         ion_mass = mz * charge - (charge - 1) * MASS_PROTON
-        if charge > 1:
-            protons_text = f"{MASS_PROTON:.5f}" if charge == 2 else f"{charge-1} x {MASS_PROTON:.5f}"
-            line = (f"{ion_type}{i} is observed at m/z {mz:.5f} as a {charge}+ ion. "
-                    f"Converting it to a singly charged ion gives {mz:.5f} x {charge} - {protons_text} = {ion_mass:.5f} Da.")
-        else:
-            line = f"{ion_type}{i} is observed at m/z {mz:.5f}."
         
+        if charge > 1:
+            step["singly_charged_mass"] = ion_mass
+
         if loss is not None:
-            loss_mass = NEUTRAL_LOSS_MASSES[loss]
-            line += (f" This peak has lost {loss} ({loss_mass:.5f} Da), "
-                     f"so adding it back gives {ion_mass + loss_mass:.5f} Da.")
-            ion_mass +=loss_mass
+            ion_mass += NEUTRAL_LOSS_MASSES[loss]
+        step['ion_mass'] = ion_mass
 
         # Name the PTMs on the first observed ion that contains them, as later ions contain them too.
         new_ptms = []
@@ -119,46 +104,123 @@ def extend_ladder(ion_type, matched_ion, label_peptide, precursor_mz, precursor_
             new_ptms += re.findall(r'\[([^\]]+)\]', token)
 
         if new_ptms:
+            step["ptms"] = [(VARIABLE_MODS[d][0], VARIABLE_MODS[d][1], c) for d, c in Counter(new_ptms).items()]
+
+        if i == 1: 
+            if ion_type == 'y':
+                aa_mass = ion_mass - NEUTRAL_LOSS_MASSES['H2O'] - MASS_PROTON
+            else:
+                aa_mass = ion_mass - MASS_PROTON
+            step.update(method="first", residue_mass=aa_mass, residue=residues[0], pos=to_pos(1))            
+        elif prev_mass is not None:
+            step.update(method="diff", prev_ion=f"{ion_type}{i-1}", prev_mass=prev_mass,
+            residue_mass=ion_mass - prev_mass, residue=residues[i-1], pos=to_pos(i))
+        else:
+            #Gap: no previous ion, so no residue named
+            step["method"] = None
+
+        steps.append(step)
+        prev_mass = ion_mass
+
+    return steps
+
+
+def render_ladder(steps, explain_precursor, fixed_mods):
+    # Text only: every number comes from the steps
+    traces = []
+    for s in steps:
+        if s["method"] == "precursor":
+            if explain_precursor:
+                precursor_text = (f"The neutral peptide mass is computed from the precursor m/z ({s['precursor_mz']:.5f}) and charge "
+                                    f"({s['precursor_charge']}+): {s['precursor_mz']:.5f} x {s['precursor_charge']} - {s['precursor_charge']} x "
+                                    f"{MASS_PROTON:.5f} = {s['neutral_mass']:.5f} Da. "
+                                    )
+            else:
+                precursor_text = ""
+            if s["ion_type"] == 'y':
+                traces.append(
+                    f"The remaining residue at the N-terminus comes from the precursor. {precursor_text}"
+                    f"The neutral peptide mass ({s['neutral_mass']:.5f} Da) minus {s['prev_ion']} ({s['prev_mass']:.5f} Da) plus one proton "
+                    f"({MASS_PROTON:.5f} Da) gives {s['residue_mass']:.5f} Da, which matches the residue mass of {residue_text(s['residue'], fixed_mods)}."
+                )
+            else:
+                traces.append(
+                    f"The remaining residue at the C-terminus comes from the precursor. {precursor_text}"
+                    f"The neutral peptide mass ({s['neutral_mass']:.5f} Da) minus H2O ({NEUTRAL_LOSS_MASSES['H2O']:.5f} Da), " 
+                    f"minus {s['prev_ion']} ({s['prev_mass']:.5f} Da), plus one proton ({MASS_PROTON:.5f} Da) gives {s['residue_mass']:.5f} Da, "
+                    f"which matches the residue mass of {residue_text(s['residue'], fixed_mods)}."
+                )
+                    
+            continue
+
+        ion, mz, charge = s["ion"], s["mz"], s["charge"]
+        if charge > 1:
+            protons_text = f"{MASS_PROTON:.5f}" if charge == 2 else f"{charge-1} x {MASS_PROTON:.5f}"
+            line = (f"{ion} is observed at m/z {mz:.5f} as a {charge}+ ion. "
+                    f"Converting it to a singly charged ion gives {mz:.5f} x {charge} - {protons_text} = {s['singly_charged_mass']:.5f} Da.")
+        else:
+            line = f"{ion} is observed at m/z {mz:.5f}."
+        
+        if s["loss"] is not None:
+            line += (f" This peak has lost {s['loss']} ({NEUTRAL_LOSS_MASSES[s['loss']]:.5f} Da), "
+                     f"so adding it back gives {s['ion_mass']:.5f} Da.")
+
+        if "ptms" in s:
             parts = []
-            for delta, count in Counter(new_ptms).items():
-                name, mass = VARIABLE_MODS[delta]
+            for name, mass, count in s["ptms"]:
                 if count == 1:
                     parts.append(f"{name} (+{mass:.5f} Da)")
                 else:
                     parts.append(f"{count} {name}s ({count} x {mass:.5f} = {count * mass:.5f} Da)")
-
             line += f" This ion carries {' and '.join(parts)}."
         
-        if i == 1: 
-            if ion_type == 'y':
-                aa_mass = ion_mass - NEUTRAL_LOSS_MASSES['H2O'] - MASS_PROTON
+        if s["method"] == "first":
+            if ion[0] == 'y':
                 line += (f" Since y1 contains only the last residue plus H2O and a proton, subtracting H2O "
-                f"({NEUTRAL_LOSS_MASSES['H2O']:.5f} Da) and a proton ({MASS_PROTON:.5f} Da) leaves {aa_mass:.5f} Da, "
-                f"which matches the residue mass of {residue_text(residues[0], fixed_mods)}.")
+                f"({NEUTRAL_LOSS_MASSES['H2O']:.5f} Da) and a proton ({MASS_PROTON:.5f} Da) leaves {s['residue_mass']:.5f} Da, "
+                f"which matches the residue mass of {residue_text(s['residue'], fixed_mods)}.")
             else:
-                aa_mass = ion_mass - MASS_PROTON
                 line += (f" Since b1 contains only the first residue plus a proton, subtracting the proton "
-                f"({MASS_PROTON:.5f} Da) leaves {aa_mass:.5f} Da, which matches the residue mass of {residue_text(residues[0], fixed_mods)}.")
-            residues_found.append({"pos": to_pos(1), "method": "first"})
-
-        elif prev_mass is not None:
-            line += (f" The mass difference between {ion_type}{i-1} and {ion_type}{i} is {ion_mass:.5f} - {prev_mass:.5f} = "
-            f"{ion_mass - prev_mass:.5f} Da, which matches the residue mass of {residue_text(residues[i-1], fixed_mods)}.")
-            residues_found.append({"pos": to_pos(i), "method": "diff"})
+                f"({MASS_PROTON:.5f} Da) leaves {s['residue_mass']:.5f} Da, which matches the residue mass of {residue_text(s['residue'], fixed_mods)}.")
+        elif s["method"] == "diff":
+            line += (f" The mass difference between {s['prev_ion']} and {ion} is {s['ion_mass']:.5f} - {s['prev_mass']:.5f} = "
+            f"{s['residue_mass']:.5f} Da, which matches the residue mass of {residue_text(s['residue'], fixed_mods)}.")
 
         traces.append(line)
-        prev_mass = ion_mass
 
-    return traces, ions, residues_found
+    return traces
+
+def round_floats(value, digits=5):
+    
+    # Round every float in the steps for savingl the calculations above keep full precision
+    if isinstance(value, float):
+        return round(value, digits)
+    if isinstance(value, (list, tuple)):
+        return [round_floats(v, digits) for v in value]
+    if isinstance(value, dict):
+        return {k: round_floats(v, digits) for k,v in value.items()}
+    
+    return value
+
+
+def ions_and_residues(steps):
+    # The record fields the stats already use, derived from the steps
+    ions = [{"ion": s["ion"], "mz": round(s["mz"], 5), "theoretical_mz": round(s["theoretical_mz"], 5), 
+            "intensity": round(s["intensity"], 5), "charge": s["charge"], "loss": s["loss"]}
+            for s in steps if s["method"] != "precursor"]
+    residues = [{"pos": s["pos"], "method": s["method"]} for s in steps if s["method"]]
+
+    return ions, residues    
 
 def derive_peptide(matched_y, matched_b, label_peptide, precursor_mz, precursor_charge, fixed_mods):
-    y_traces, y_ions, y_residues = extend_ladder('y', matched_y, label_peptide, precursor_mz, precursor_charge, 
-                                                 explain_precursor=True, fixed_mods=fixed_mods)
+    y_steps = build_ladder('y', matched_y, label_peptide, precursor_mz, precursor_charge, fixed_mods)
+    b_steps = build_ladder('b', matched_b, label_peptide, precursor_mz, precursor_charge, fixed_mods)
 
-    # Explain the precursor conversion in the b ladder only if the y ladder did not already use it.   
-    y_used_precursor = any(r['method'] == 'precursor' for r in y_residues)
-    b_traces, b_ions, b_residues = extend_ladder('b', matched_b, label_peptide, precursor_mz, precursor_charge, 
-                                                 explain_precursor= not y_used_precursor, fixed_mods=fixed_mods)
+    # Explain the precursor conversion in the b ladder only if the y_ladder did not already use it.
+    y_used_precursor = any(s['method'] == 'precursor' for s in y_steps)
+    y_traces = render_ladder(y_steps, explain_precursor=True, fixed_mods=fixed_mods)
+    b_traces = render_ladder(b_steps, explain_precursor=not y_used_precursor, fixed_mods=fixed_mods)
+                    
 
     intro =(f"To determine the peptide sequence, I derive residues from the y-ion ladder, starting at the C-terminus, "
             "and then the b-ion ladder, starting at the N-terminus. Each residue is identified from the mass " 
@@ -177,10 +239,8 @@ def derive_peptide(matched_y, matched_b, label_peptide, precursor_mz, precursor_
     )
 
     ladder_info = {
-        "y_ions": y_ions,
-        "b_ions": b_ions,
-        "y_residues": y_residues,
-        "b_residues": b_residues,
+        "y_steps": round_floats(y_steps),
+        "b_steps": round_floats(b_steps),
     }
 
     return label_peptide, reasoning_trace, ladder_info
@@ -352,9 +412,11 @@ def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance, 
 def spectrum_stats(modified_peptide, ladder_info):
     tokens = tokenize_peptide(modified_peptide)
     n = len(tokens)
-    n_b, n_y = len(ladder_info['b_ions']), len(ladder_info['y_ions'])
-    supported = {r['pos'] for r in ladder_info['y_residues'] + ladder_info['b_residues']}
-    errors = [abs(ion['mz'] - ion['theoretical_mz']) for ion in ladder_info['b_ions'] + ladder_info['y_ions']]
+    y_ions, y_residues = ions_and_residues(ladder_info['y_steps'])
+    b_ions, b_residues = ions_and_residues(ladder_info['b_steps'])
+    n_b, n_y = len(b_ions), len(y_ions)
+    supported = {r['pos'] for r in y_residues + b_residues}
+    errors = [abs(ion['mz'] - ion['theoretical_mz']) for ion in b_ions + y_ions]
 
     return {
         'b_coverage': 100 * n_b / (n-1),
@@ -494,8 +556,9 @@ if __name__ == "__main__":
     VERBOSE = args.verbose
     NUM_EXAMPLES = args.num_examples if args.num_examples > 0 else None
     SAVE_DATASET = not args.no_save
-    input_name = os.path.splitext(os.path.basename(input_data_path))[0]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    n_tag = "all" if NUM_EXAMPLES is None else NUM_EXAMPLES
     os.makedirs(args.output_dir, exist_ok=True)
-    OUTPUT_PATH = os.path.join(args.output_dir, f"{input_name}.jsonl")
+    OUTPUT_PATH = os.path.join(args.output_dir, f"{timestamp}_{n_tag}_llm_reasoning_corpus.jsonl")
 
     process_input_data(input_data_path, OUTPUT_PATH, NUM_EXAMPLES, SAVE_DATASET)
