@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=reasoning_corpus
+#SBATCH --job-name=generate_corpus
 #SBATCH --partition=compute
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
