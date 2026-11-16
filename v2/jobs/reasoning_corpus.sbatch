@@ -21,5 +21,6 @@ date
 srun $PYTHON v2/llm_reasoning_corpus.py \
     --input_data_path $INPUT \
     --num_examples 0 \
-    --output_dir $OUT
+    --output_dir $OUT \
+    --final
 date

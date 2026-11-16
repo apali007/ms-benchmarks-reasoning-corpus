@@ -550,15 +550,22 @@ if __name__ == "__main__":
     parser.add_argument("--no_save", action="store_true",
                          help="Process spectra without writing a dataset file (stats-only run).")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--final", action="store_true",
+                        help="Name the output after the input parquet instead of a timestamp (for the full corpus).")
     args = parser.parse_args()
 
     input_data_path = args.input_data_path
     VERBOSE = args.verbose
     NUM_EXAMPLES = args.num_examples if args.num_examples > 0 else None
     SAVE_DATASET = not args.no_save
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    n_tag = "all" if NUM_EXAMPLES is None else NUM_EXAMPLES
     os.makedirs(args.output_dir, exist_ok=True)
-    OUTPUT_PATH = os.path.join(args.output_dir, f"{timestamp}_{n_tag}_llm_reasoning_corpus.jsonl")
+    if args.final:
+        # Final corpus: name after the input parquet (hardness_index_0.parquet - > hardness_index_0.jsonl)
+        name = os.path.splitext(os.path.basename(input_data_path))[0]
+        OUTPUT_PATH = os.path.join(args.output_dir, f"{name}.jsonl")
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        n_tag = "all" if NUM_EXAMPLES is None else NUM_EXAMPLES
+        OUTPUT_PATH = os.path.join(args.output_dir, f"{timestamp}_{n_tag}_llm_reasoning_corpus.jsonl")
 
     process_input_data(input_data_path, OUTPUT_PATH, NUM_EXAMPLES, SAVE_DATASET)
