@@ -31,18 +31,20 @@ def to_proforma(modified_peptide, fixed_mods):
     return fixed + re.sub(r'\[([\d.]+)\]', r'[+\1]', modified_peptide)
 
 def annotate(record, spectrum):
-    # spectrum_utils labels every peak it can explain: {peak m/z: {(ion, charge, loss): theoretical ions m/z}}
-    mz = np.array([p[0] for p in spectrum['peaks']])
-    intensity = np.array([p[1] for p in spectrum['peaks']], dtype=np.float32)
+    # spectrum_utils labels every peak it can explain: {(m/z, intensity): {(ion, charge, loss): theoretical ions m/z}}
+    # spectrum_utils sorts peaks by m/z, so sort them the same way to keep labels aligned with peaks
+    peaks = sorted(spectrum['peaks'])
+    mz = np.array([p[0] for p in peaks])
+    intensity = np.array([p[1] for p in peaks], dtype=np.float32)
     spec = sus.MsmsSpectrum(record['id'], spectrum['precursor_mz'], spectrum['precursor_charge'], mz, intensity)
     spec.annotate_proforma(to_proforma(record['modified_peptide'], spectrum['fixed_mods']),
                            spectrum['tolerance'], 'Da', ion_types='by', 
                            max_ion_charge=spectrum['precursor_charge'], neutral_losses=NEUTRAL_LOSSES)
     labels = defaultdict(dict)
-    for peak_mz, interpretation in zip(spec.mz, spec.annotation):
+    for peak, interpretation in zip(peaks, spec.annotation):
         for f in interpretation.fragment_annotations:
             loss = f.neutral_loss[1:] if f.neutral_loss else None
-            labels[round(float(peak_mz), 5)][(f.ion_type, f.charge, loss)] = float(peak_mz) - f.mz_delta[0]
+            labels[peak][(f.ion_type, f.charge, loss)] = peak[0] - f.mz_delta[0]
     return labels
 
 def check_ions(record, spectrum, fail):
@@ -57,7 +59,7 @@ def check_ions(record, spectrum, fail):
         # 2. within the fragment tolerance
         fail('within_tolerance', abs(s['mz'] - s['theoretical_mz']) > spectrum['tolerance'] + 1e-5, s)
         # 3. spectrum_utils labels this peak as the same ion, charge and loss
-        found = labels.get(s['mz'], {}).get(key)
+        found = labels.get((s['mz'], s['intensity']), {}).get(key)
         fail('spectrum_utils_same_ion', found is None, s)
         # 4. and computes the same theoretical m/z
         if found is not None:

@@ -6,3 +6,6 @@ v1/output/
 __pycache__/
 *.pyc
 .venv/
+
+# Practice scripts
+v2/practice/
