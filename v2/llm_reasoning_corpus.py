@@ -245,7 +245,7 @@ def derive_peptide(matched_y, matched_b, label_peptide, precursor_mz, precursor_
 
     return label_peptide, reasoning_trace, ladder_info
     
-def spectrum_to_input_text(mz_list, intensity_list, precursor_mz, precursor_charge, fixed_mods, variable_mods, fragment_tolerance):
+def spectrum_to_input_text(mz_list, intensity_list, precursor_mz, precursor_charge, fixed_mods, variable_mods, fragment_tolerance, precursor_window, precursor_window_type):
     unique_peaks = sorted(set(zip(mz_list, intensity_list)), key=lambda p: p[0])
     # peaks = sorted(zip(mz_list, intensity_list), key=lambda p: p[0])
     mods_text = ", ".join(f"{aa} +{delta:.5f} Da" for aa, delta in fixed_mods.items()) or "none"
@@ -253,6 +253,8 @@ def spectrum_to_input_text(mz_list, intensity_list, precursor_mz, precursor_char
     lines.append(f"Fixed modifications: {mods_text}")
     lines.append(f"Variable modifications: {', '.join(variable_mods) or 'none'}")
     lines.append(f"Fragment mass tolerance: {fragment_tolerance:g} Da")
+    precursor_unit = 'ppm' if precursor_window_type == 'ppm' else 'Da'
+    lines.append(f"Precursor mass tolerance: {precursor_window:g} {precursor_unit}")
     lines += ["Experimental MS/MS spectrum (m/z, intensity):"]
     lines += [f"m/z {mz:.5f}, intensity {intensity:.5f}" for mz, intensity in unique_peaks]
     lines.append("Analyze this spectrum and identify the most likely peptide sequence.")
@@ -519,7 +521,9 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
                 spec['precursor_charge'],
                 params['fixed_mods'],
                 params['variable_mods'],
-                params['fragment_tolerance']
+                params['fragment_tolerance'],
+                params['precursor_window'],
+                params['precursor_window_type']
                 ),
             'reasoning_trace': '\n'.join(reasoning_trace),
             'peptide': peptide,
