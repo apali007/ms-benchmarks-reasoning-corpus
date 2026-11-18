@@ -3,6 +3,7 @@ import json
 import re
 from collections import Counter, defaultdict
 import numpy as np
+import spectrum_utils.proforma as proforma
 import spectrum_utils.spectrum as sus
 from pyteomics import mass
 
@@ -13,6 +14,11 @@ PROTON = mass.nist_mass['H+'][0][0]
 LOSSES = {name: -m for name, m in NEUTRAL_LOSSES.items()}
 # steps are saved to 5 decimal places (each off up to 0.5e-5); a few combined, times the charge, stay under 3e-5
 ROUNDING = 3e-5
+
+# PTM names used in the corpus -> Unimod names; spectrum_utils looks up their exact masses in Unimod
+UNIMOD_NAMES = {'oxidation': 'Oxidation', 'acetylation': 'Acetyl'}
+UNIMOD_MASSES = {name: proforma.parse(f"A[{unimod}]")[0].modifications[0].mass
+                 for name, unimod in UNIMOD_NAMES.items()}
 
 def precursor_error(neutral_mass, tolerance):
     # Largest error in the neutral mass: ppm scales with the mass, Da is fixed
@@ -133,6 +139,33 @@ def check_steps(steps, ion_type, tokens, spectrum, fail):
             true_mass = residue_true_mass(s['residue'], spectrum['fixed_mods'])
             fail('residue_vs_pyteomics', abs(s['residue_mass'] - true_mass) > allowed + ROUNDING, s)
 
+
+def check_ptms(steps, ion_type, tokens, fail):
+    # Each PTM is named, with its Unimod mass, on the first observed ion that covers its residue
+    n = len(tokens)
+    covered = set() # positions covered by earlier ions this ladder
+    for s in steps:
+        if s['method'] == 'precursor':
+            continue
+        i = int(s['ion'][1:])
+        # b_i covers positions 1..i, y_i covers the last i positions
+        positions = set(range(1, i+1)) if ion_type == 'b' else set(range(n - i + 1, n + 1))
+        # residues this ion is first to cover
+        new = positions - covered
+        covered |= positions
+        # mods expected on this ion: the [delta]s on the newly covered residues, e.g. {'15.9949': 1}
+        expected = Counter(d for p in new for d in re.findall(r'\[([^\]]+)\]', tokens[p-1]))
+
+        found = Counter()
+        for name, ptm_mass, count in s.get('ptms', []):
+            unimod = UNIMOD_MASSES.get(name)
+            fail('ptm_mass_unimod', unimod is None or abs(ptm_mass - unimod) > ROUNDING, s)
+            # which [delta] in the peptide this named PTM is
+            delta = next((d for d in expected if unimod is not None and abs(float(d) - unimod) < 1e-4), None)
+            found[delta] += count
+        if expected or found:
+            fail('ptm_placement', found != expected, s)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Verify the ions and calculations in a reasoning corpus")
     parser.add_argument("corpus_path")
@@ -160,7 +193,7 @@ if __name__ == "__main__":
             tokens = re.findall(r'[A-Z](?:\[[^\]]+\])*', record['modified_peptide'])
             for ion_type in ('y', 'b'):
                 check_steps(record[f'{ion_type}_steps'], ion_type, tokens, spectrum, fail)
-                # check_ptms(record[f'{ion_type}_steps'], ion_type, tokens, fail)
+                check_ptms(record[f'{ion_type}_steps'], ion_type, tokens, fail)
 
             n += 1
 
