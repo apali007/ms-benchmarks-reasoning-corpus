@@ -33,6 +33,9 @@ NEUTRAL_LOSS_MASSES = {
     'NH3': 17.026549105
 }
 
+# Residues whose side chain can lose each neutral loss (the rule OpenMS and Mascot use)
+NEUTRAL_LOSS_RESIDUES = {'H2O': set('DEST'), 'NH3': set('KNQR')}
+
 MASS_PROTON =  1.007276467
 
 TOLERANCE_BY_ANALYZER = {

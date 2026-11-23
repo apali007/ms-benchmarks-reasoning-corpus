@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 
 from constants import (
-    AA_MASSES, NEUTRAL_LOSS_MASSES, MASS_PROTON,
+    AA_MASSES, NEUTRAL_LOSS_MASSES, NEUTRAL_LOSS_RESIDUES, MASS_PROTON,
     DATASET_METADATA_ROOT, VARIABLE_MODS, SEARCH_OUTPUT_ROOT
 )
 
@@ -379,8 +379,13 @@ def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance, 
         b_ions, y_ions = theoretical_ions(peptide, aa_masses, charge)
         for name, tmz in {**b_ions, **y_ions}.items():
             theoretical.append((0, name, charge, None, tmz))
+            # b_i holds the first i residues, y_i the last i
+            i = int(name[1:])
+            residues = {token[0] for token in (peptide[:i] if name[0] == 'b' else peptide[-i:])}
             for loss, loss_mass in NEUTRAL_LOSS_MASSES.items():
-                theoretical.append((1, name, charge, loss, tmz - loss_mass / charge))
+                # a fragment can only lose H2O/NH3 if it has a residue whose side chain can lose it
+                if residues & NEUTRAL_LOSS_RESIDUES[loss]:
+                    theoretical.append((1, name, charge, loss, tmz - loss_mass / charge))
 
     # All (ion, charge, peak) pairs within tolerance
     candidates = []
