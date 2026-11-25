@@ -373,7 +373,9 @@ def parse_parquet(parquet_path, num_examples=100):
 def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance, max_fragment_charge):
     # Each theoretical ion: (loss_rank, name, charge, loss, m/z). Intact ions have loss_rank 0, neutral losses 1.
     theoretical = []
-    peaks = list(zip(mz_list, intensity_list))
+    # sorted by m/z, so the peaks near each ion can be found with a binary search
+    peaks = sorted(zip(mz_list, intensity_list))
+    peak_mzs = np.array([mz for mz, _ in peaks])
 
     for charge in range(1, max_fragment_charge + 1):
         b_ions, y_ions = theoretical_ions(peptide, aa_masses, charge)
@@ -387,13 +389,17 @@ def match_ions(peptide, mz_list, intensity_list, aa_masses, fragment_tolerance, 
                 if residues & NEUTRAL_LOSS_RESIDUES[loss]:
                     theoretical.append((1, name, charge, loss, tmz - loss_mass / charge))
 
-    # All (ion, charge, peak) pairs within tolerance
+    # All (ion, charge, peak) pairs within tolerance: peaks[start:end] are the peaks within tolerance of each ion
+    theoretical_mzs = np.array([ion[4] for ion in theoretical])
+    starts = np.searchsorted(peak_mzs, theoretical_mzs - fragment_tolerance, side='left')
+    ends = np.searchsorted(peak_mzs, theoretical_mzs + fragment_tolerance, side='right')
+
     candidates = []
-    for loss_rank, name, charge, loss, tmz in theoretical:
-        for peak_idx, (mz, intensity) in enumerate(peaks):
+    for (loss_rank, name, charge, loss, tmz), start, end in zip(theoretical, starts, ends):
+        for peak_idx in range(start, end):
+            mz, intensity = peaks[peak_idx]
             error = abs(mz-tmz)
-            if error <= fragment_tolerance:
-                candidates.append((loss_rank, charge, error, -intensity, name, loss, peak_idx, tmz))
+            candidates.append((loss_rank, charge, error, -intensity, name, loss, peak_idx, tmz))
 
     # Intact before neutral loss, lower charge first, then closest, then most intense; 
     # each ion and each peak used at most once

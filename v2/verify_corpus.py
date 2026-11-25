@@ -163,7 +163,7 @@ def check_ptms(steps, ion_type, tokens, fail):
         positions = set(range(1, i+1)) if ion_type == 'b' else set(range(n - i + 1, n + 1))
         # residues this ion is first to cover
         new = positions - covered
-        # an ion nmber longer than the peptide is already a failure; only look at real positions
+        # an ion number longer than the peptide is already a failure; only look at real positions
         new &= set(range(1, n+1))
         covered |= positions
         # mods expected on this ion: the [delta]s on the newly covered residues, e.g. {'15.9949': 1}
