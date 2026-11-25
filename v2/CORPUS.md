@@ -63,7 +63,7 @@ Always present:
 | `mz` | observed peak m/z |
 | `theoretical_mz` | calculated m/z for this ion at **this charge and loss** (what the peak matched) |
 | `intensity` | observed intensity (raw) |
-| `charge` | fragment charge, 1 to precursor charge |
+| `charge` | fragment charge, 1 to max(1, precursor charge - 1) |
 | `loss` | `null`, `"H2O"` or `"NH3"` |
 | `ion_mass` | the peak as a **1+, intact** ion; what the ladder subtracts |
 | `method` | see above |

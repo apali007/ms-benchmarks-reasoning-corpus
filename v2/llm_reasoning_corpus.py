@@ -504,7 +504,7 @@ def process_input_data(input_data_path, output_path, num_examples, save_dataset)
 
         matched_y, matched_b, annotations, noise = match_ions(
             tokens, spec['mz'], spec['intensity'], 
-            aa_masses, params['fragment_tolerance'], spec['precursor_charge'])
+            aa_masses, params['fragment_tolerance'], max(1, spec['precursor_charge']-1))
         
         final_sequence, reasoning_trace, ladder_info = derive_peptide(
             matched_y,

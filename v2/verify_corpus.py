@@ -69,9 +69,9 @@ def to_openms(tokens, spectrum):
     return ('.' + nterm if nterm else '') + ''.join(residues)
 
 def theoretical_ions(tokens, spectrum):
-    # OpenMS theoretical ions of the label peptide, charges 1..precursor charge: {'y4++': m/z, 'b2-H2O1+': m/z, ...}
+    # OpenMS theoretical ions of the label peptide, charges 1..max(1, precursor charge-1): {'y4++': m/z, 'b2-H2O1+': m/z, ...}
     ions = oms.MSSpectrum()
-    GENERATOR.getSpectrum(ions, oms.AASequence.fromString(to_openms(tokens, spectrum)), 1, spectrum['precursor_charge'])
+    GENERATOR.getSpectrum(ions, oms.AASequence.fromString(to_openms(tokens, spectrum)), 1, max(1, spectrum['precursor_charge']-1))
     names = ions.getStringDataArrays()[0]
     return {name.decode(): peak.getMZ() for peak, name in zip(ions, names)}
 
